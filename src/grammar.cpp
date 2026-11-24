@@ -44,14 +44,20 @@ ParseResult &Unwrap(ParseResult &result) {
 }
 
 unique_ptr<ParsedExpression> AsExpression(PEGTransformer &transformer, ParseResult &result) {
-	auto &inner = Unwrap(result);
-	if (inner.type == ParseResultType::STRING) {
-		return inner.Cast<StringLiteralParseResult>().ToExpression();
+	// Unwrap choices only. Collapsing a one-child list drops the rule name
+	// (NestedColumnName, Parens, FunctionExpression) and the transform then
+	// sees the wrong node.
+	ParseResult *node = &result;
+	while (node->type == ParseResultType::CHOICE) {
+		node = &node->Cast<ChoiceParseResult>().GetResult();
 	}
-	if (inner.type == ParseResultType::NUMBER) {
-		return ConstantExpression::Number(inner.Cast<NumberParseResult>().number);
+	if (node->type == ParseResultType::STRING) {
+		return node->Cast<StringLiteralParseResult>().ToExpression();
 	}
-	return transformer.Transform<unique_ptr<ParsedExpression>>(inner);
+	if (node->type == ParseResultType::NUMBER) {
+		return ConstantExpression::Number(node->Cast<NumberParseResult>().number);
+	}
+	return transformer.Transform<unique_ptr<ParsedExpression>>(*node);
 }
 
 string AsIdentifier(ParseResult &result) {
@@ -280,7 +286,7 @@ public:
 			changes.push_back(GrammarChange::AddChoice("UnreservedKeyword", word));
 		}
 		changes.push_back(GrammarChange::AddRule(
-		    "RvbbitAtom <- ColumnReference / LiteralExpression / FunctionExpression / ParensExpression / "
+		    "RvbbitAtom <- FunctionExpression / ParensExpression / ColumnReference / LiteralExpression / "
 		    "StructExpression / CaseExpression",
 		    [](PEGTransformer &transformer, ParseResult &result) {
 			    return Start(transformer, result, FinalizeAtom);

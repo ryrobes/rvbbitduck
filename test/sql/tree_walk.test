@@ -1,0 +1,78 @@
+# name: test/sql/tree_walk.test
+# description: a NO edge may land on another branch
+# group: [sql]
+
+require rvbbit
+
+statement ok
+SET rvbbit_transport='mock';
+
+statement ok
+SET rvbbit_ignore_env=true;
+
+query I
+SELECT (rvbbit.decision_tree(
+    'thanks for the help today',
+    rvbbit.branch(
+        'the customer wants to cancel',
+        yes := rvbbit.leaf('retention'),
+        no := rvbbit.branch(
+            'this is about billing',
+            yes := rvbbit.leaf('finance'),
+            no := rvbbit.leaf('routine'))))).label;
+----
+routine
+
+query I
+SELECT (rvbbit.decision_tree(
+    'please cancel the appointment',
+    rvbbit.branch(
+        'the customer wants to cancel',
+        yes := rvbbit.leaf('retention'),
+        no := rvbbit.branch(
+            'this is about billing',
+            yes := rvbbit.leaf('finance'),
+            no := rvbbit.branch(
+                'shipping is the concern',
+                yes := rvbbit.leaf('shipping'),
+                no := rvbbit.leaf('other')))))).label;
+----
+retention
+
+query I
+SELECT label FROM (
+    SELECT s, (rvbbit.decision_tree(
+        s,
+        rvbbit.branch(
+            'the customer wants to cancel',
+            yes := rvbbit.leaf('retention'),
+            no := rvbbit.branch(
+                'this is about billing',
+                yes := rvbbit.leaf('finance'),
+                no := rvbbit.leaf('routine'))))).label AS label
+    FROM (VALUES ('thanks for the help today'), ('please cancel the appointment')) v(s)
+) ORDER BY label;
+----
+retention
+routine
+
+statement ok
+SET active_grammar_extensions = ['rvbbit'];
+
+query I
+SELECT SEMANTIC CASE ON 'thanks for the help today'
+    WHEN 'the customer wants to cancel' ABOVE 0.8 THEN 'retention'
+    WHEN 'billing is the concern' THEN 'finance'
+    ELSE 'routine'
+END;
+----
+routine
+
+query I
+SELECT rvbbit.semantic_case(
+    'thanks for the help today',
+    ['the customer wants to cancel', 'billing is the concern'],
+    ['retention', 'finance'],
+    'routine');
+----
+routine

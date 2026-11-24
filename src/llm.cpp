@@ -40,7 +40,7 @@ Json Message(const string &role, const string &content) {
 	return message;
 }
 
-string ChatBody(const string &model, const string &system, const string &user, int max_tokens) {
+string ChatBody(const string &model, const string &system, const string &user, int max_tokens, const string &reasoning) {
 	Json messages = Json::Array();
 	messages.arr.push_back(Message("system", system));
 	messages.arr.push_back(Message("user", user));
@@ -49,6 +49,7 @@ string ChatBody(const string &model, const string &system, const string &user, i
 	body.Set("messages", std::move(messages));
 	body.Set("temperature", Json::Number(0));
 	body.Set("max_tokens", Json::Number(max_tokens));
+	SetReasoning(body, reasoning);
 	return body.Dump();
 }
 
@@ -62,8 +63,8 @@ string ChatContent(const string &response, string &error) {
 		}
 		auto message = choices->arr[0].Find("message");
 		auto content = message ? message->Find("content") : nullptr;
-		if (!content || !content->IsString()) {
-			error = "chat response has no content";
+		if (!content || content->IsNull() || !content->IsString() || Trim(content->str).empty()) {
+			error = "chat response content was empty";
 			return "";
 		}
 		error.clear();
@@ -135,17 +136,35 @@ unordered_map<string, string> ResolveChats(ClientContext &context, const vector<
 	}
 	if (!missing.empty()) {
 		auto fetched = FetchPost(context, "chat", missing);
+		vector<string> retry;
 		for (idx_t i = 0; i < missing.size(); i++) {
 			if (!fetched[i].ok) {
 				continue;
 			}
 			string error;
 			auto content = ChatContent(fetched[i].body, error);
-			if (!error.empty() && content.empty()) {
+			if (!error.empty() || content.empty()) {
+				retry.push_back(missing[i]);
 				continue;
 			}
 			CachePut(context, Md5Hex(string("chat\n") + missing[i]), content);
 			resolved[missing[i]] = content;
+		}
+		if (!retry.empty()) {
+			auto again = FetchPost(context, "chat", retry);
+			for (idx_t i = 0; i < retry.size(); i++) {
+				if (i >= again.size() || !again[i].ok) {
+					continue;
+				}
+				string error;
+				auto content = ChatContent(again[i].body, error);
+				if (!error.empty() || content.empty()) {
+					throw InvalidInputException(
+					    "chat response content was empty. rvbbit_reasoning defaults to disabled so the token budget is not spent on reasoning.");
+				}
+				CachePut(context, Md5Hex(string("chat\n") + retry[i]), content);
+				resolved[retry[i]] = content;
+			}
 		}
 	}
 	return resolved;
@@ -228,7 +247,7 @@ void RunChat(DataChunk &args, ExpressionState &state, Vector &result, ChatParser
 			max_tokens = std::stoi(user.substr(max_pos + 2));
 			user = user.substr(0, max_pos);
 		}
-		requests[row] = ChatBody(provider.chat_model, system, user, max_tokens);
+		requests[row] = ChatBody(provider.chat_model, system, user, max_tokens, LoadSettings(context).reasoning);
 	}
 	vector<string> needed;
 	for (idx_t row = 0; row < args.size(); row++) {

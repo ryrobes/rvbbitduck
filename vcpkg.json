@@ -1,0 +1,12 @@
+{
+  "name": "rvbbit",
+  "version-string": "0.1.0",
+  "description": "rvbbit semantic SQL. HTTP is libcurl with OpenSSL and HTTP/2. httpfs is not required.",
+  "dependencies": [
+    {
+      "name": "curl",
+      "features": ["ssl", "http2"]
+    }
+  ],
+  "builtin-baseline": "cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3"
+}

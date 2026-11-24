@@ -76,6 +76,74 @@ SELECT (DECIDE churn FOR 'please cancel the appointment').label;
 ----
 retention
 
+statement ok
+CREATE TABLE tickets AS
+SELECT * FROM (VALUES
+    (1, 'thanks for the help today'),
+    (2, 'please cancel the appointment')) v(id, body);
+
+query I
+SELECT body MEANS 'wants to cancel' FROM tickets ORDER BY id;
+----
+false
+true
+
+query I
+SELECT t.body ABOUT 'billing' > 0.5 FROM tickets t ORDER BY id;
+----
+false
+false
+
+query I
+SELECT (body) MEANS 'wants to cancel' FROM tickets ORDER BY id;
+----
+false
+true
+
+query I
+SELECT lower(body) MEANS 'wants to cancel' FROM tickets ORDER BY id;
+----
+false
+true
+
+statement ok
+SET rvbbit_embed_dim=32;
+
+query I
+SELECT body NEAR 'cancel my subscription please' > body NEAR 'thanks for the wonderful help'
+FROM (SELECT 'please cancel the order' AS body) t;
+----
+true
+
+query I
+SELECT SEMANTIC CASE ON body
+    WHEN 'the customer wants to cancel' ABOVE 0.8 THEN 'retention'
+    WHEN 'billing is the concern' THEN 'finance'
+    ELSE 'routine'
+END
+FROM tickets ORDER BY id;
+----
+routine
+retention
+
+statement ok
+CREATE DECISION TREE ticket_route AS
+    BRANCH 'wants to cancel'
+        YES 'retention'
+        NO 'routine';
+
+query I
+SELECT (DECIDE ticket_route FOR body).label FROM tickets ORDER BY id;
+----
+routine
+retention
+
+query I
+SELECT (DECIDE ticket_route FOR t.body).label FROM tickets t ORDER BY id;
+----
+routine
+retention
+
 # The function form still works while the grammar is on.
 query I
 SELECT rvbbit.means('please cancel the appointment', 'wants to cancel');

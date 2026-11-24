@@ -17,6 +17,7 @@ include_directories(src/include)
 
 set(EXTENSION_SOURCES
     src/json_mini.cpp
+    src/http_curl.cpp
     src/engine.cpp
     src/decisions.cpp
     src/llm.cpp
@@ -27,6 +28,12 @@ set(EXTENSION_SOURCES
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
+
+# libcurl is the HTTP client. httpfs is not required. vcpkg.json pins curl
+# for a reproducible extension build; this tree also accepts the system library.
+find_package(CURL REQUIRED)
+target_link_libraries(${EXTENSION_NAME} CURL::libcurl)
+target_link_libraries(${LOADABLE_EXTENSION_NAME} CURL::libcurl)
 
 install(
   TARGETS ${EXTENSION_NAME}

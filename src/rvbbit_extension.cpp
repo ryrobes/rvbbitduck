@@ -310,6 +310,15 @@ void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption(Identifier("rvbbit_ignore_env"),
 	                          "When true, OPENROUTER_API_KEY is not a fallback. Tests use this.", LogicalType::BOOLEAN,
 	                          Value::BOOLEAN(false));
+	config.AddExtensionOption(Identifier("rvbbit_reasoning"),
+	                          "Chat reasoning control: disabled (default, {enabled:false}), none, minimal, low, "
+	                          "medium, high, or enabled.",
+	                          LogicalType::VARCHAR, Value("disabled"));
+	config.AddExtensionOption(Identifier("rvbbit_timeout_sec"), "HTTP timeout for one OpenRouter POST.",
+	                          LogicalType::INTEGER, Value::INTEGER(60));
+	config.AddExtensionOption(Identifier("rvbbit_tls_verify"),
+	                          "Verify TLS certificates. Tests against a local mock set this to false.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	rvbbit::RegisterSecret(loader);
 	rvbbit::RegisterSupport(loader);

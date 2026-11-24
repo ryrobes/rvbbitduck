@@ -191,10 +191,10 @@ SELECT rvbbit.exec('ping', 'hello');
 
 ## Embeddings
 
-`rvbbit.embed(text)` returns `FLOAT[]`. The length is `rvbbit_embed_dim` when that setting is at least 2, otherwise the secret's `EMBED_DIM`, otherwise 1024. The request is OpenAI-shaped:
+`rvbbit.embed(text)` returns `FLOAT[]`. The length is `rvbbit_embed_dim` when that setting is at least 2, otherwise the secret's `EMBED_DIM`, otherwise 1024. The default model is `mongodb/voyage-4`. `voyageai/voyage-4` is accepted and rewritten to that id before the request and the cache key. The request is OpenAI-shaped:
 
 ```json
-{"model":"voyageai/voyage-4","input":["..."],"dimensions":1024}
+{"model":"mongodb/voyage-4","input":["..."],"dimensions":1024}
 ```
 
 `POST {base}/api/v1/embeddings`. Identical texts in one chunk share one slot. Misses go out in batches of 64. The cache key is the model, the dimension, and the text after Calliope's mode prefix. `embed(text, 'query')` prefixes nomic (`search_query:` / `search_document:`), e5 (`query:` / `passage:`), and bge (the query instruction). An empty mode, and every other model, sends the raw text. `knn_text` and the composites embed raw, the same way Calliope's generic path does, so they share one vector space.
@@ -253,7 +253,7 @@ SELECT (rvbbit.locate(
 FROM listings;
 ```
 
-`truth_rank(state, question, levels)` sends a score question whose criteria are the level names, and returns the chosen name. Calliope 1.2.3 does not ship this question. The request matches the score branch `decide` already accepts: `type` `score`, a `criteria` object, and an answer `score` that is one of those keys. The evidence boundary is applied, unlike a box.
+`truth_rank(state, question, levels)` sends a score question whose `criteria` is the level array, in order. Jev answers with a numeric `score` (an index), a `legend` of index to label, and `probabilities` keyed by index. The function returns the legend label with the highest probability. Calliope 1.2.3 does not ship this question. The evidence boundary is applied, unlike a box.
 
 ```sql
 SELECT rvbbit.truth_rank(body, 'how urgent is this', ['low', 'medium', 'high'])

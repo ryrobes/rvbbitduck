@@ -9,7 +9,7 @@ The extension you `LOAD` is named `rvbbit`. Functions live in the `rvbbit` schem
 ## What works in this version
 
 - `CREATE SECRET (TYPE openrouter, KEY '...')`, plus `OPENROUTER_API_KEY` if no secret is present. Optional `BASE_URL`, `DECISION_MODEL`, `CHAT_MODEL`, `EMBED_MODEL`, and `EMBED_DIM` on the secret. Settings of the same names override those. `rvbbit_embed_dim` of 0 keeps the secret or the default 1024.
-- HTTP inside the extension. Each vector dedupes identical bodies. A process-wide cap (`rvbbit_max_concurrency`, default 8) bounds in-flight calls. 429 and 5xx retry with backoff, honoring `Retry-After` up to 5 seconds. Failures are not cached and do not become `false`.
+- HTTP inside the extension, through libcurl. `LOAD rvbbit` does not need httpfs. Requests share a connection cache and ask for HTTP/2. Each vector dedupes identical bodies and posts them together, bounded by `rvbbit_max_concurrency` (default 8). 429 and 5xx retry with backoff, honoring `Retry-After` up to 5 seconds. A connection failure raises; it does not come back as NULL. `vcpkg.json` pins `curl[ssl,http2]` at the extension-ci-tools baseline `2026.06.24`. This repository's CI links the system libcurl instead of compiling OpenSSL.
 - An in-memory LRU (`rvbbit_cache_size`, default 10000) and, when `rvbbit_cache_path` is set, a DuckDB file with a `judgments` table and a `trees` table.
 - Decisions, matched to Calliope's request shape: `POST {base}/api/alpha/decisions` with model `typesafe/jev-1.13` and contract `clover-decisions-v1`. The evidence boundary is prefixed on every non-box question.
 - `truth`, `truth_score`, `choose`, `decide`, `truth_question`, `choice_question`.
@@ -20,8 +20,9 @@ The extension you `LOAD` is named `rvbbit`. Functions live in the `rvbbit` schem
 - The `rvbbit.operators()` catalog, seeded from Calliope 1.2.3: `means`, `about`, `summarize`, `classify`, `extract`, `condense`, `sentiment`, `contradicts`, `supports`, `implies`, `clean_year` (retry), `redact` (blocking post-ward), `headline` (3 takes and an evaluator), `safe_classify` (LLM step plus `validate_one_of`), and dimension lists `themes`, `tags`, `aspects`, `entities`, `keyphrases`. `prompt` stays free-form.
 - `create_operator`, `set_operator_retry`, `set_operator_wards`, and `set_operator_takes`. A custom operator becomes a macro in `main` (`ping(...)`) and is always callable as `rvbbit.exec('ping', ...)`.
 - Opt-in grammar: `MEANS`, `ABOUT`, `NEAR`, `ABOVE`, `SUPPORTS`, `CONTRADICTS`, `IMPLIES`, `SEMANTIC CASE`, `CREATE DECISION TREE`, `DECIDE name FOR state`. See [docs/SYNTAX.md](docs/SYNTAX.md).
-- Embeddings: `embed` returns `FLOAT[]` at `rvbbit_embed_dim` (default 1024, model `voyageai/voyage-4`) via `POST {base}/api/v1/embeddings`. A chunk is deduped and sent in batches of 64. nomic, e5, and bge get Calliope's query/document prefixes before the cache key. `similarity`, `knn_text`, `nearest_label`, `topics`, `dedupe_groups`, and `diff` sit on that cache. `CAST(rvbbit.embed(text) AS FLOAT[1024])` works with DuckDB `NEAREST` and `array_cosine_similarity`.
-- `image_part` (data URL or PNG/JPEG bytes), `box_question`, and `locate`. `locate` pins `typesafe/jev-1.14`, skips the evidence boundary, and returns `{top, bottom, left, right, confidence}`. `truth_rank` asks a score question and returns one of the supplied levels.
+- Embeddings: `embed` returns `FLOAT[]` at `rvbbit_embed_dim` (default 1024, model `mongodb/voyage-4`; `voyageai/voyage-4` is an alias) via `POST {base}/api/v1/embeddings`. A chunk is deduped and sent in batches of 64. nomic, e5, and bge get Calliope's query/document prefixes before the cache key. `similarity`, `knn_text`, `nearest_label`, `topics`, `dedupe_groups`, and `diff` sit on that cache. `CAST(rvbbit.embed(text) AS FLOAT[1024])` works with DuckDB `NEAREST` and `array_cosine_similarity`.
+- `image_part` (data URL or PNG/JPEG bytes), `box_question`, and `locate`. `locate` pins `typesafe/jev-1.14`, skips the evidence boundary, and returns `{top, bottom, left, right, confidence}`. `truth_rank` sends a score question whose `criteria` is an array of levels and returns the legend label for the winning index.
+- Catalog operators (`sentiment`, `means`, `about`, and the other single-call operators) batch the chunk in one `FetchPost`, the same way `prompt` does. They follow `SET rvbbit_chat_model` and a secret `CHAT_MODEL`. Chat requests send `reasoning: {enabled: false}` unless `rvbbit_reasoning` says otherwise. An empty completion is an error, not a silent NULL.
 
 `rvbbit_base_url` defaults to `https://openrouter.ai`. Point it at Hutch or another gateway only if that gateway serves `/api/alpha/decisions`, `/api/v1/chat/completions`, and `/api/v1/embeddings`.
 
@@ -33,7 +34,8 @@ The extension you `LOAD` is named `rvbbit`. Functions live in the `rvbbit` schem
 - The vss HNSW index is not linked. Build a `FLOAT[N]` column with `embed(...)::FLOAT[N]` (N must equal `rvbbit_embed_dim`, 1024 by default) and `INSTALL vss; LOAD vss;` yourself. CI covers brute-force `NEAREST`, not HNSW.
 - `knn_text`, `topics`, `dedupe_groups`, and `diff` take `VARCHAR[]`, not a Postgres `regclass` plus a column name. Lists are capped at 2000 texts. `dedupe_groups` is pairwise cosine, so it is O(N²). `topics` runs a small deterministic k-means and caps k at 16. `nearest_label` is the embedding nearest-branch; `semantic_case` stays the Jev tree.
 - `image_part` checks the data-URL prefix or the PNG/JPEG signature. Pixel bounds (each side 256–1568) are enforced by Jev, not here. Remote URLs are rejected.
-- `truth_rank` sends `{type: score, criteria: {level: level}}` because Calliope 1.2.3 has no score-question SQL. The answer is the level name the model returns. That wire shape is the one this extension already validated for `decide`.
+- `truth_rank` follows the live Jev score shape: `criteria` is an array, and the answer is a numeric index plus a `legend`. Calliope 1.2.3 has no score-question SQL. The label returned is `legend[argmax(probabilities)]`, or the rounded index when probabilities are absent.
+- A WASM HTTP transport is only a hook. `__EMSCRIPTEN__` builds raise a clear error instead of linking libcurl.
 - No receipt or cost ledger, and no `prewarm`. Cache keys are MD5, not blake3. `tree_id` is MD5 of canonical compact JSON, not Postgres `md5(tree::jsonb::text)`.
 
 ## Install and build
@@ -169,8 +171,11 @@ It is not enough, without replacing a core expression rule, to drop a new infix 
 | `rvbbit_base_url` | empty | Overrides the secret origin. |
 | `rvbbit_decision_model` | empty | Overrides the Jev model. |
 | `rvbbit_chat_model` | empty | Overrides the chat model. |
-| `rvbbit_embed_model` | empty | Overrides the embeddings model. Empty uses the secret or `voyageai/voyage-4`. |
+| `rvbbit_embed_model` | empty | Overrides the embeddings model. Empty uses the secret or `mongodb/voyage-4`. `voyageai/voyage-4` is rewritten to that id. |
 | `rvbbit_embed_dim` | `0` | `0` uses the secret or 1024. Any other value is the list length `embed` returns and the `dimensions` field sent to OpenRouter. |
+| `rvbbit_reasoning` | `disabled` | `disabled` sends `{"enabled": false}`. `none`, `minimal`, `low`, `medium`, and `high` send `{"effort": ...}`. `enabled` turns reasoning on. |
+| `rvbbit_timeout_sec` | `60` | Timeout for one POST. Connect timeout is 10 seconds. |
+| `rvbbit_tls_verify` | `true` | Set false only for a local certificate, as `scripts/transport_smoke.sh` does. |
 | `rvbbit_ignore_env` | `false` | Ignore `OPENROUTER_API_KEY`. |
 
 `rvbbit.cache_stats()`, `rvbbit.cache_purge()`, `rvbbit.cache_clear_memory()`, and `rvbbit.http_log()` inspect the engine. `mock_reset`, `mock_fail_next`, and `mock_noul` exist so tests can force a score or a 429 without a socket.
@@ -180,7 +185,8 @@ It is not enough, without replacing a core expression rule, to drop a new infix 
 1. **Aggregate operators** such as `classify_collection`, heterogeneous `takes.nodes`, and a receipt or cost ledger beside the judgment cache.
 2. **HNSW as an optional install.** vss stays out of this build. A later helper can create the `FLOAT[N]` column and the index when the user has `LOAD vss`. Brute-force `NEAREST` is what CI checks.
 3. **Grammar follow-ups, only if the API grows.** A real precedence slot for word operators, and a `WHEN` arm that can hold a comparison. Until then the function form stays the contract.
-4. **Live checks, still outside CI.** Embeddings and `locate` are mocked here. A keyed smoke can confirm that `voyageai/voyage-4` honors `dimensions: 1024` and that Jev 1.14 returns a box. Pixel-size checks stay on that service.
+4. **Live checks, still outside CI.** `scripts/live_smoke.sh` runs truth, choose, sentiment, embed, locate, truth_rank, and a nested `no` branch when `OPENROUTER_API_KEY` is set. CI runs `scripts/transport_smoke.sh` against a local HTTP/HTTPS server instead, and refuses to spend a key.
+5. **WASM transport.** The native client is libcurl. An emscripten build needs its own POST implementation behind `LivePostMany`.
 
 ## License
 

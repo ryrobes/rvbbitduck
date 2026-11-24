@@ -148,8 +148,8 @@ string ChatContentOf(const string &response, string &error) {
 		}
 		auto message = choices->arr[0].Find("message");
 		auto content = message ? message->Find("content") : nullptr;
-		if (!content || !content->IsString()) {
-			error = "chat response has no content";
+		if (!content || content->IsNull() || !content->IsString() || Trim(content->str).empty()) {
+			error = "chat response content was empty";
 			return "";
 		}
 		error.clear();
@@ -160,7 +160,8 @@ string ChatContentOf(const string &response, string &error) {
 	}
 }
 
-string ChatBody(const Operator &op, const string &model, const string &system, const string &user) {
+string ChatBody(const Operator &op, const string &model, const string &system, const string &user,
+                 const string &reasoning) {
 	Json messages = Json::Array();
 	Json system_message = Json::Object();
 	system_message.Set("role", Json::String("system"));
@@ -175,7 +176,16 @@ string ChatBody(const Operator &op, const string &model, const string &system, c
 	body.Set("messages", std::move(messages));
 	body.Set("temperature", Json::Number(op.has_temperature ? op.temperature : 0));
 	body.Set("max_tokens", Json::Number(op.max_tokens));
+	SetReasoning(body, reasoning);
 	return body.Dump();
+}
+
+string OperatorModel(ClientContext &context, const Operator &op) {
+	auto provider = ResolveProvider(context, LoadSettings(context));
+	if (provider.chat_model_from_user && !provider.chat_model.empty()) {
+		return provider.chat_model;
+	}
+	return op.model.empty() ? DEFAULT_CHAT_MODEL : op.model;
 }
 
 struct Work {
@@ -185,19 +195,35 @@ struct Work {
 };
 
 Work Chat(ClientContext &context, const Operator &op, const string &model, const string &system, const string &user) {
+	auto settings = LoadSettings(context);
+	auto request = ChatBody(op, model, system, user, settings.reasoning);
+	int attempts = std::max(1, settings.max_retries + 1);
 	Work work;
-	auto fetched = FetchPost(context, "chat", {ChatBody(op, model, system, user)});
-	if (fetched.empty() || !fetched[0].ok) {
-		work.error = fetched.empty() ? "chat failed" : fetched[0].error;
+	for (int attempt = 1; attempt <= attempts; attempt++) {
+		auto fetched = FetchPost(context, "chat", {request});
+		if (fetched.empty() || !fetched[0].ok) {
+			work.error = fetched.empty() ? "chat failed" : fetched[0].error;
+			work.ok = false;
+			return work;
+		}
+		string error;
+		work.output = ChatContentOf(fetched[0].body, error);
+		if (!error.empty()) {
+			work.error = error;
+			work.ok = false;
+			if (error != "chat response content was empty" || attempt == attempts) {
+				if (error == "chat response content was empty") {
+					throw InvalidInputException(
+					    "chat response content was empty. rvbbit_reasoning defaults to disabled so the token budget is not spent on reasoning.");
+				}
+				return work;
+			}
+			continue;
+		}
+		work.ok = true;
+		work.error.clear();
 		return work;
 	}
-	string error;
-	work.output = ChatContentOf(fetched[0].body, error);
-	if (!error.empty()) {
-		work.error = error;
-		return work;
-	}
-	work.ok = true;
 	return work;
 }
 
@@ -223,7 +249,8 @@ string ValidateOneOf(const string &value, const string &allowed, const string &f
 	return current.empty() ? (fallback.empty() ? "unknown" : fallback) : current;
 }
 
-Work RunSteps(ClientContext &context, const Operator &op, const Json &inputs, const string &feedback) {
+Work RunSteps(ClientContext &context, const Operator &op, const Json &inputs, const string &feedback,
+              const string &model) {
 	Json steps = Json::Parse(op.steps);
 	Json done = Json::Object();
 	Work last;
@@ -251,7 +278,8 @@ Work RunSteps(ClientContext &context, const Operator &op, const Json &inputs, co
 			if (!feedback.empty()) {
 				user_text += "\n\n" + feedback;
 			}
-			last = Chat(context, step_op, op.model, system && system->IsString() ? system->str : "", user_text);
+			last = Chat(context, step_op, model.empty() ? op.model : model, system && system->IsString() ? system->str : "",
+			            user_text);
 			if (!last.ok) {
 				return last;
 			}
@@ -282,7 +310,7 @@ Work RunSteps(ClientContext &context, const Operator &op, const Json &inputs, co
 
 Work RunBody(ClientContext &context, const Operator &op, const Json &inputs, const string &model, const string &feedback) {
 	if (!op.steps.empty()) {
-		return RunSteps(context, op, inputs, feedback);
+		return RunSteps(context, op, inputs, feedback, model);
 	}
 	auto user = Render(op.user_prompt, inputs, nullptr, "", 1);
 	if (!feedback.empty()) {
@@ -407,15 +435,16 @@ bool Wards(const string &json, const char *slot, const string &output, const Jso
 	return true;
 }
 
-Work ExecuteAttempt(ClientContext &context, const Operator &op, const Json &inputs, const string &feedback) {
+Work ExecuteAttempt(ClientContext &context, const Operator &op, const Json &inputs, const string &feedback,
+                     const string &resolved_model) {
 	if (op.takes.empty()) {
-		return RunBody(context, op, inputs, "", feedback);
+		return RunBody(context, op, inputs, resolved_model, feedback);
 	}
 	Json plan;
 	try {
 		plan = Json::Parse(op.takes);
 	} catch (const std::exception &) {
-		return RunBody(context, op, inputs, "", feedback);
+		return RunBody(context, op, inputs, resolved_model, feedback);
 	}
 	int factor = 1;
 	if (auto value = plan.Find("factor"); value && value->IsNumber()) {
@@ -431,7 +460,7 @@ Work ExecuteAttempt(ClientContext &context, const Operator &op, const Json &inpu
 	}
 	vector<Work> takes;
 	for (int i = 0; i < factor; i++) {
-		string model = models.empty() ? "" : models[static_cast<size_t>(i) % models.size()];
+		string model = models.empty() ? resolved_model : models[static_cast<size_t>(i) % models.size()];
 		takes.push_back(RunBody(context, op, inputs, model, feedback));
 	}
 	vector<idx_t> alive;
@@ -578,7 +607,7 @@ Work ApplyRetry(ClientContext &context, const Operator &op, const Json &inputs, 
 		if (instructions && instructions->IsString()) {
 			feedback = Render(instructions->str, inputs, nullptr, result.output, attempt + 1);
 		}
-		result = ExecuteAttempt(context, op, inputs, feedback);
+		result = ExecuteAttempt(context, op, inputs, feedback, OperatorModel(context, op));
 		if (!result.ok) {
 			return result;
 		}
@@ -643,8 +672,8 @@ bool Typed(const Operator &op, const Work &work, Vector &result, idx_t row) {
 	return true;
 }
 
-string FinalCacheKey(const Operator &op, const Json &inputs) {
-	return Md5Hex("operator\n" + op.name + "\n" + op.model + "\n" + op.system_prompt + "\n" + op.user_prompt + "\n" +
+string FinalCacheKey(const Operator &op, const Json &inputs, const string &model) {
+	return Md5Hex("operator\n" + op.name + "\n" + model + "\n" + op.system_prompt + "\n" + op.user_prompt + "\n" +
 	              op.parser + "\n" + op.steps + "\n" + op.retry + "\n" + op.wards + "\n" + op.takes + "\n" +
 	              inputs.Dump());
 }
@@ -658,8 +687,9 @@ void ExecuteOne(ClientContext &context, const Operator &op, const Json &inputs, 
 	if (!op.wards.empty() && !Wards(op.wards, "pre", "", inputs, blocking) && blocking) {
 		throw InvalidInputException("input rejected by a blocking pre-ward");
 	}
+	auto model = OperatorModel(context, op);
 	string cached;
-	auto key = FinalCacheKey(op, inputs);
+	auto key = FinalCacheKey(op, inputs, model);
 	if (CacheGet(context, key, cached)) {
 		Work hit;
 		hit.ok = true;
@@ -667,7 +697,7 @@ void ExecuteOne(ClientContext &context, const Operator &op, const Json &inputs, 
 		Typed(op, hit, result, row);
 		return;
 	}
-	auto work = ExecuteAttempt(context, op, inputs, "");
+	auto work = ExecuteAttempt(context, op, inputs, "", model);
 	work = ApplyRetry(context, op, inputs, std::move(work));
 	if (!op.wards.empty()) {
 		if (!Wards(op.wards, "post", work.output, inputs, blocking) && blocking) {
@@ -695,9 +725,52 @@ Json InputsFrom(const Operator &op, DataChunk &args, idx_t row, bool &any_null) 
 	return inputs;
 }
 
+void FinishOperator(ClientContext &context, const Operator &op, const Json &inputs, const string &key, Work work,
+                    Vector &result, idx_t row) {
+	bool blocking = false;
+	if (!op.wards.empty()) {
+		if (!Wards(op.wards, "post", work.output, inputs, blocking) && blocking) {
+			work.ok = false;
+			work.error = "output rejected by a blocking post-ward";
+		}
+	}
+	if (work.ok && work.error.empty()) {
+		CachePut(context, key, work.output);
+	}
+	Typed(op, work, result, row);
+}
+
 void RunNamed(const string &name, DataChunk &args, ExpressionState &state, Vector &result) {
 	auto op = CopyOf(name);
 	auto &context = state.GetContext();
+	if (op.shape == "aggregate" || op.shape == "rowset" || op.shape == "query") {
+		throw InvalidInputException("rvbbit: operator '" + op.name + "' has shape " + op.shape +
+		                            ", which is registered but not executed in this version");
+	}
+	// Retry, takes, and multi-step operators still run per row. Their HTTP calls
+	// go through FetchPost, which dedupes identical bodies. A plain catalog call
+	// (sentiment, means, about, ...) is one batched POST for the chunk.
+	if (!op.steps.empty() || !op.takes.empty() || !op.retry.empty()) {
+		for (idx_t row = 0; row < args.size(); row++) {
+			bool any_null = false;
+			auto inputs = InputsFrom(op, args, row, any_null);
+			if (any_null) {
+				result.SetValue(row, Value(result.GetType()));
+				continue;
+			}
+			ExecuteOne(context, op, inputs, result, row);
+		}
+		return;
+	}
+	auto model = OperatorModel(context, op);
+	auto reasoning = LoadSettings(context).reasoning;
+	struct Item {
+		idx_t row;
+		Json inputs;
+		string body;
+		string key;
+	};
+	vector<Item> pending;
 	for (idx_t row = 0; row < args.size(); row++) {
 		bool any_null = false;
 		auto inputs = InputsFrom(op, args, row, any_null);
@@ -705,7 +778,71 @@ void RunNamed(const string &name, DataChunk &args, ExpressionState &state, Vecto
 			result.SetValue(row, Value(result.GetType()));
 			continue;
 		}
-		ExecuteOne(context, op, inputs, result, row);
+		bool blocking = false;
+		if (!op.wards.empty() && !Wards(op.wards, "pre", "", inputs, blocking) && blocking) {
+			throw InvalidInputException("input rejected by a blocking pre-ward");
+		}
+		auto key = FinalCacheKey(op, inputs, model);
+		string cached;
+		if (CacheGet(context, key, cached)) {
+			Work hit;
+			hit.ok = true;
+			hit.output = cached;
+			Typed(op, hit, result, row);
+			continue;
+		}
+		auto user = Render(op.user_prompt, inputs, nullptr, "", 1);
+		pending.push_back(Item {row, std::move(inputs), ChatBody(op, model, op.system_prompt, user, reasoning), key});
+	}
+	if (pending.empty()) {
+		return;
+	}
+	vector<string> bodies;
+	bodies.reserve(pending.size());
+	for (auto &item : pending) {
+		bodies.push_back(item.body);
+	}
+	auto fetched = FetchPost(context, "chat", bodies);
+	vector<idx_t> retry;
+	for (idx_t i = 0; i < pending.size(); i++) {
+		Work work;
+		if (i >= fetched.size() || !fetched[i].ok) {
+			work.error = i >= fetched.size() ? "chat failed" : fetched[i].error;
+			FinishOperator(context, op, pending[i].inputs, pending[i].key, work, result, pending[i].row);
+			continue;
+		}
+		string error;
+		work.output = ChatContentOf(fetched[i].body, error);
+		if (!error.empty()) {
+			retry.push_back(i);
+			continue;
+		}
+		work.ok = true;
+		FinishOperator(context, op, pending[i].inputs, pending[i].key, std::move(work), result, pending[i].row);
+	}
+	if (retry.empty()) {
+		return;
+	}
+	vector<string> again;
+	for (auto index : retry) {
+		again.push_back(pending[index].body);
+	}
+	auto second = FetchPost(context, "chat", again);
+	for (idx_t n = 0; n < retry.size(); n++) {
+		auto &item = pending[retry[n]];
+		Work work;
+		string error;
+		if (n >= second.size() || !second[n].ok) {
+			work.error = n >= second.size() ? "chat failed" : second[n].error;
+		} else {
+			work.output = ChatContentOf(second[n].body, error);
+		}
+		if (!error.empty() || work.output.empty()) {
+			throw InvalidInputException(
+			    "chat response content was empty. rvbbit_reasoning defaults to disabled so the token budget is not spent on reasoning.");
+		}
+		work.ok = true;
+		FinishOperator(context, op, item.inputs, item.key, std::move(work), result, item.row);
 	}
 }
 

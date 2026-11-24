@@ -18,7 +18,7 @@ jobs:
           submodules: true
 
       - name: Install Ninja
-        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build python3
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build python3 libcurl4-openssl-dev openssl pkg-config
 
       - name: Build
         run: GEN=ninja make release -j$(nproc)
@@ -34,6 +34,12 @@ jobs:
           CC: gcc
           CXX: g++
           LINUX_CI_IN_DOCKER: 1
+
+      - name: Real transport against a local server
+        run: bash ./scripts/transport_smoke.sh
+        env:
+          CC: gcc
+          CXX: g++
 
       - name: Live smoke is skipped without a key
         run: |

@@ -125,6 +125,25 @@ SELECT ('please cancel the order' NEAR 'cancel my subscription') > ('please canc
 true
 
 statement ok
+SET rvbbit_embed_model='voyageai/voyage-4';
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT len(rvbbit.embed('alias check please'));
+----
+32
+
+query I
+SELECT count(*) FROM rvbbit.http_log() WHERE kind = 'embed' AND position('mongodb/voyage-4' IN body) > 0;
+----
+1
+
+statement ok
 SET rvbbit_embed_model='';
 
 statement ok

@@ -6,7 +6,6 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/http/http_util.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 
@@ -397,25 +396,33 @@ Json MockDecision(const Json &request) {
 			answers.Set(entry.first, std::move(answer));
 		} else if (type->str == "score") {
 			auto criteria = question.Find("criteria");
-			if (!criteria || !criteria->IsObject() || criteria->obj.size() < 2) {
-				throw std::runtime_error("mock score question needs levels");
+			if (!criteria || !criteria->IsArray() || criteria->arr.size() < 2) {
+				throw std::runtime_error("mock score question needs a criteria array");
 			}
-			idx_t best = criteria->obj.size() / 2;
+			idx_t best = criteria->arr.size() / 2;
 			bool any = false;
-			for (idx_t i = 0; i < criteria->obj.size(); i++) {
-				if (Overlaps(state_text, criteria->obj[i].first) ||
-				    (criteria->obj[i].second.IsString() && Overlaps(state_text, criteria->obj[i].second.str))) {
+			for (idx_t i = 0; i < criteria->arr.size(); i++) {
+				if (criteria->arr[i].IsString() && Overlaps(state_text, criteria->arr[i].str)) {
 					best = i;
 					any = true;
 					break;
 				}
 			}
+			Json legend = Json::Object();
+			Json probs = Json::Object();
+			double winner = any ? 0.8 : 0.55;
+			double rest = criteria->arr.size() == 1 ? 0 : (1.0 - winner) / static_cast<double>(criteria->arr.size() - 1);
+			for (idx_t i = 0; i < criteria->arr.size(); i++) {
+				string key = std::to_string(i);
+				legend.Set(key, criteria->arr[i].IsString() ? Json::String(criteria->arr[i].str) : Json::String(""));
+				probs.Set(key, Json::Number(i == best ? winner : rest));
+			}
 			Json answer = Json::Object();
 			answer.Set("type", Json::String("score"));
-			answer.Set("score", Json::String(criteria->obj[best].first));
-			if (!any) {
-				answer.Set("confidence", Json::Number(0.4));
-			}
+			answer.Set("score", Json::Number(static_cast<double>(best)));
+			answer.Set("legend", std::move(legend));
+			answer.Set("probabilities", std::move(probs));
+			answer.Set("confidence", Json::Number(any ? 0.8 : 0.4));
 			answers.Set(entry.first, std::move(answer));
 		} else if (type->str == "box") {
 			bool hit = Overlaps(state_text, focus);
@@ -658,49 +665,6 @@ Json MockChat(const Json &request) {
 	return response;
 }
 
-FetchResult LivePost(ClientContext &context, const string &url, const string &body, const string &api_key) {
-	FetchResult result;
-	auto &http = HTTPUtil::Get(*context.db);
-	auto params = http.InitializeParameters(*context.db, url);
-	params->timeout = 30;
-	params->retries = 0;
-	HTTPHeaders headers(*context.db);
-	headers.Insert("Authorization", "Bearer " + api_key);
-	headers.Insert("Content-Type", "application/json");
-	headers.Insert("HTTP-Referer", "https://github.com/ryrobes/rvbbitduck");
-	headers.Insert("X-Title", "rvbbitduck");
-	PostRequestInfo post(url, headers, *params, reinterpret_cast<const_data_ptr_t>(body.data()), body.size());
-	post.try_request = true;
-	unique_ptr<HTTPResponse> response;
-	try {
-		response = http.Request(post);
-	} catch (const InterruptException &) {
-		throw;
-	} catch (const std::exception &ex) {
-		result.error = ex.what();
-		result.status = 0;
-		return result;
-	}
-	if (!response) {
-		result.error = "HTTP request returned no response";
-		return result;
-	}
-	result.status = static_cast<int>(response->status);
-	result.body = response->body;
-	if (response->HasRequestError()) {
-		result.error = response->GetRequestError();
-	}
-	result.ok = result.error.empty() && result.status >= 200 && result.status < 300;
-	if (!result.ok && result.error.empty()) {
-		result.error = "HTTP status " + std::to_string(result.status);
-	}
-	auto retry_after = response->GetHeaderValue("Retry-After");
-	if (!retry_after.empty()) {
-		result.error += " retry-after=" + retry_after;
-	}
-	return result;
-}
-
 bool Retryable(const FetchResult &result) {
 	return result.status == 429 || result.status == 408 || (result.status >= 500 && result.status <= 599) ||
 	       result.status == 0;
@@ -834,9 +798,8 @@ FetchResult PostOne(ClientContext &context, const RuntimeSettings &settings, con
                     const string &kind, const string &body) {
 	auto &engine = Engine::Get();
 	string url = Endpoint(provider, kind);
-	if (settings.transport != "mock" && provider.api_key.empty()) {
-		throw InvalidInputException(
-		    "OpenRouter API key is not configured. CREATE SECRET (TYPE openrouter, KEY '...') or set OPENROUTER_API_KEY.");
+	if (settings.transport != "mock") {
+		throw InternalException("live HTTP is posted by LivePostMany");
 	}
 	FetchResult last;
 	int attempts = std::max(0, settings.max_retries) + 1;
@@ -844,19 +807,7 @@ FetchResult PostOne(ClientContext &context, const RuntimeSettings &settings, con
 		if (context.IsInterrupted()) {
 			throw InterruptException();
 		}
-		FetchResult result;
-		if (settings.transport == "mock") {
-			result = MockPost(engine, kind, body);
-		} else {
-			engine.Acquire(context);
-			try {
-				result = LivePost(context, url, body, provider.api_key);
-			} catch (...) {
-				engine.Release();
-				throw;
-			}
-			engine.Release();
-		}
+		FetchResult result = MockPost(engine, kind, body);
 		engine.NoteHttp(kind, url, result.status, body);
 		last = result;
 		if (result.ok || !Retryable(result) || attempt == attempts) {
@@ -888,6 +839,9 @@ RuntimeSettings LoadSettings(ClientContext &context) {
 	settings.cache_size = SettingInt(context, "rvbbit_cache_size", 10000);
 	settings.max_retries = SettingInt(context, "rvbbit_max_retries", 3);
 	settings.retry_base_ms = SettingInt(context, "rvbbit_retry_base_ms", 200);
+	settings.timeout_sec = SettingInt(context, "rvbbit_timeout_sec", 60);
+	settings.tls_verify = SettingBool(context, "rvbbit_tls_verify", true);
+	settings.reasoning = LowerCopy(SettingString(context, "rvbbit_reasoning", "disabled"));
 	settings.ignore_env = SettingBool(context, "rvbbit_ignore_env", false);
 	if (settings.transport != "live" && settings.transport != "mock") {
 		throw InvalidInputException("rvbbit_transport must be 'live' or 'mock'");
@@ -903,6 +857,15 @@ RuntimeSettings LoadSettings(ClientContext &context) {
 	}
 	if (settings.embed_dim > 4096) {
 		settings.embed_dim = 4096;
+	}
+	if (settings.timeout_sec < 1) {
+		settings.timeout_sec = 1;
+	}
+	if (settings.reasoning != "disabled" && settings.reasoning != "none" && settings.reasoning != "minimal" &&
+	    settings.reasoning != "low" && settings.reasoning != "medium" && settings.reasoning != "high" &&
+	    settings.reasoning != "enabled") {
+		throw InvalidInputException(
+		    "rvbbit_reasoning must be disabled, none, minimal, low, medium, high, or enabled");
 	}
 	return settings;
 }
@@ -938,6 +901,7 @@ ProviderConfig ResolveProvider(ClientContext &context, const RuntimeSettings &se
 		auto chat = secret.TryGetValue(Identifier("chat_model"), false);
 		if (!chat.IsNull() && !TrimCopy(chat.ToString()).empty()) {
 			config.chat_model = TrimCopy(chat.ToString());
+			config.chat_model_from_user = true;
 		}
 		auto embed = secret.TryGetValue(Identifier("embed_model"), false);
 		if (!embed.IsNull() && !TrimCopy(embed.ToString()).empty()) {
@@ -963,6 +927,7 @@ ProviderConfig ResolveProvider(ClientContext &context, const RuntimeSettings &se
 	}
 	if (!settings.chat_model.empty()) {
 		config.chat_model = settings.chat_model;
+		config.chat_model_from_user = true;
 	}
 	if (!settings.embed_model.empty()) {
 		config.embed_model = settings.embed_model;
@@ -973,6 +938,7 @@ ProviderConfig ResolveProvider(ClientContext &context, const RuntimeSettings &se
 	if (config.embed_dim < 2 || config.embed_dim > 4096) {
 		config.embed_dim = DEFAULT_EMBED_DIM;
 	}
+	config.embed_model = CanonicalEmbedModel(config.embed_model);
 	return config;
 }
 
@@ -995,6 +961,22 @@ vector<FetchResult> FetchPost(ClientContext &context, const string &kind, vector
 	if (!unique.empty() && settings.transport == "live" && provider.api_key.empty()) {
 		throw InvalidInputException(
 		    "OpenRouter API key is not configured. CREATE SECRET (TYPE openrouter, KEY '...') or set OPENROUTER_API_KEY.");
+	}
+	if (!unique.empty() && settings.transport != "mock") {
+		LivePostOptions options;
+		options.concurrency = settings.max_concurrency;
+		options.timeout_sec = settings.timeout_sec;
+		options.max_retries = settings.max_retries;
+		options.retry_base_ms = settings.retry_base_ms;
+		options.tls_verify = settings.tls_verify;
+		unique_results = LivePostMany(context, kind, Endpoint(provider, kind), unique, provider.api_key, options);
+		vector<FetchResult> results;
+		results.reserve(bodies.size());
+		for (auto &body : bodies) {
+			auto found = std::find(unique.begin(), unique.end(), body);
+			results.push_back(unique_results[static_cast<idx_t>(found - unique.begin())]);
+		}
+		return results;
 	}
 	std::atomic<idx_t> next {0};
 	std::mutex error_mu;
@@ -1234,6 +1216,31 @@ bool GrammarRegistered() {
 
 void SetGrammarRegistered(bool value) {
 	Engine::Get().grammar_registered = value;
+}
+
+void RecordHttp(const string &kind, const string &url, int status, const string &body) {
+	Engine::Get().NoteHttp(kind, url, status, body);
+}
+
+void SetReasoning(Json &body, const string &mode) {
+	auto kind = LowerCopy(mode);
+	Json reasoning = Json::Object();
+	if (kind.empty() || kind == "disabled") {
+		reasoning.Set("enabled", Json::Bool(false));
+	} else if (kind == "enabled") {
+		reasoning.Set("enabled", Json::Bool(true));
+	} else {
+		reasoning.Set("effort", Json::String(kind));
+	}
+	body.Set("reasoning", std::move(reasoning));
+}
+
+string CanonicalEmbedModel(string model) {
+	auto lower = LowerCopy(model);
+	if (lower == "voyageai/voyage-4" || lower == "voyage-4") {
+		return DEFAULT_EMBED_MODEL;
+	}
+	return model;
 }
 
 } // namespace rvbbit

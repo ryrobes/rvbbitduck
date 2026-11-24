@@ -156,3 +156,28 @@ query I
 SELECT rvbbit.exec('echo_mail', 'mail ada@example.com today');
 ----
 NULL
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SET rvbbit_chat_model='unit-test/chat';
+
+query I
+SELECT rvbbit.sentiment(text)
+FROM (VALUES ('please cancel this order'), ('thanks for the help today')) v(text);
+----
+negative
+positive
+
+query I
+SELECT count(*) FROM rvbbit.http_log()
+WHERE kind = 'chat' AND position('unit-test/chat' IN body) > 0 AND position('"enabled":false' IN body) > 0;
+----
+2
+
+statement ok
+SET rvbbit_chat_model='';

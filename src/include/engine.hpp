@@ -13,7 +13,8 @@ inline constexpr const char *DECISION_CONTRACT = "clover-decisions-v1";
 inline constexpr const char *DEFAULT_DECISION_MODEL = "typesafe/jev-1.13";
 inline constexpr const char *DEFAULT_BOX_MODEL = "typesafe/jev-1.14";
 inline constexpr const char *DEFAULT_CHAT_MODEL = "openai/gpt-6-luna";
-inline constexpr const char *DEFAULT_EMBED_MODEL = "voyageai/voyage-4";
+inline constexpr const char *DEFAULT_EMBED_MODEL = "mongodb/voyage-4";
+inline constexpr const char *EMBED_MODEL_ALIAS = "voyageai/voyage-4";
 inline constexpr int32_t DEFAULT_EMBED_DIM = 1024;
 inline constexpr const char *DEFAULT_BASE_URL = "https://openrouter.ai";
 inline constexpr const char *EVIDENCE_BOUNDARY =
@@ -28,6 +29,8 @@ struct ProviderConfig {
 	string embed_model;
 	int32_t embed_dim = DEFAULT_EMBED_DIM;
 	string key_source; // secret, env, none
+	//! True when the secret or rvbbit_chat_model named a chat model.
+	bool chat_model_from_user = false;
 };
 
 struct RuntimeSettings {
@@ -42,6 +45,9 @@ struct RuntimeSettings {
 	int32_t cache_size = 10000;
 	int32_t max_retries = 3;
 	int32_t retry_base_ms = 200;
+	int32_t timeout_sec = 60;
+	bool tls_verify = true;
+	string reasoning = "disabled";
 	bool ignore_env = false;
 };
 
@@ -65,6 +71,26 @@ string Md5Hex(const string &data);
 //! deduped. Successful raw responses are not cached here; callers cache only
 //! validated results via CacheGet/CachePut. Failures are never cached.
 vector<FetchResult> FetchPost(ClientContext &context, const string &kind, vector<string> bodies);
+
+//! Native POST. libcurl, shared connections, HTTP/2 when the library supports it.
+//! A WASM build hits the hook in this function and does not link libcurl.
+struct LivePostOptions {
+	int32_t concurrency = 8;
+	int32_t timeout_sec = 60;
+	int32_t max_retries = 3;
+	int32_t retry_base_ms = 200;
+	bool tls_verify = true;
+};
+vector<FetchResult> LivePostMany(ClientContext &context, const string &kind, const string &url,
+                                 const vector<string> &bodies, const string &api_key, const LivePostOptions &options);
+
+//! Attach OpenRouter reasoning control. "disabled" sends {"enabled": false}.
+void SetReasoning(Json &body, const string &mode);
+
+//! voyageai/voyage-4 is an accepted alias of mongodb/voyage-4.
+string CanonicalEmbedModel(string model);
+
+void RecordHttp(const string &kind, const string &url, int status, const string &body);
 
 bool CacheGet(ClientContext &context, const string &key, string &payload_out);
 void CachePut(ClientContext &context, const string &key, const string &payload);

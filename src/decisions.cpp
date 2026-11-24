@@ -102,10 +102,20 @@ void PrefixQuestions(Json &questions) {
 			throw InvalidInputException("instructions must contain 1 to 2000 characters");
 		}
 		entry.second.Set("instructions", Json::String(WithBoundary(text, type->str)));
-		if (type->str == "choice" || type->str == "score") {
+		if (type->str == "choice") {
 			auto criteria = entry.second.Find("criteria");
 			if (!criteria || !criteria->IsObject() || criteria->obj.size() < 2 || criteria->obj.size() > 16) {
-				throw InvalidInputException(type->str + " questions need 2 to 16 criteria");
+				throw InvalidInputException("choice questions need 2 to 16 criteria");
+			}
+		} else if (type->str == "score") {
+			auto criteria = entry.second.Find("criteria");
+			if (!criteria || !criteria->IsArray() || criteria->arr.size() < 2 || criteria->arr.size() > 16) {
+				throw InvalidInputException("score questions need 2 to 16 levels");
+			}
+			for (auto &level : criteria->arr) {
+				if (!level.IsString() || Trim(level.str).empty()) {
+					throw InvalidInputException("score questions need 2 to 16 levels");
+				}
 			}
 		} else if (type->str != "noul" && type->str != "box") {
 			throw InvalidInputException("unsupported question type " + type->str);
@@ -274,11 +284,51 @@ string NormalizeDecision(const string &request_body, const string &response_body
 		} else if (qtype->str == "score") {
 			auto criteria = entry.second.Find("criteria");
 			auto score = answer->Find("score");
-			if (!criteria || !score || !score->IsString() || !criteria->Has(score->str)) {
+			auto legend = answer->Find("legend");
+			auto probs = answer->Find("probabilities");
+			if (!criteria || !criteria->IsArray() || criteria->arr.empty()) {
+				error = "invalid score criteria";
+				return "";
+			}
+			int index = -1;
+			double best_probability = -1;
+			if (probs && probs->IsObject()) {
+				for (auto &probability : probs->obj) {
+					if (!probability.second.IsNumber() || probability.second.num < best_probability) {
+						continue;
+					}
+					try {
+						index = std::stoi(probability.first);
+						best_probability = probability.second.num;
+					} catch (const std::exception &) {
+					}
+				}
+			}
+			if (index < 0 && score && score->IsNumber() && std::isfinite(score->num)) {
+				index = static_cast<int>(std::llround(score->num));
+			}
+			string label;
+			if (legend && legend->IsObject() && index >= 0) {
+				auto item = legend->Find(std::to_string(index));
+				if (item && item->IsString()) {
+					label = item->str;
+				}
+			}
+			if (label.empty() && index >= 0 && static_cast<size_t>(index) < criteria->arr.size() &&
+			    criteria->arr[static_cast<size_t>(index)].IsString()) {
+				label = criteria->arr[static_cast<size_t>(index)].str;
+			}
+			if (label.empty() && score && score->IsString()) {
+				label = score->str;
+			}
+			if (label.empty()) {
 				error = "invalid score answer";
 				return "";
 			}
-			kept.Set("score", Json::String(score->str));
+			kept.Set("score", Json::String(label));
+			if (index >= 0) {
+				kept.Set("index", Json::Number(index));
+			}
 		} else if (qtype->str == "box") {
 			auto box = answer->Find("box");
 			if (!box || !box->IsObject()) {
@@ -866,7 +916,9 @@ void Advance(Cursor &cursor, const string &normalized) {
 	cursor.path.arr.push_back(std::move(trace));
 	cursor.judgments.arr.push_back(std::move(judgment));
 	cursor.location += "/" + EscapeRoute(route);
-	cursor.node = *next;
+	// next points into cursor.node. Copy before the assignment replaces that storage.
+	Json next_node = *next;
+	cursor.node = std::move(next_node);
 }
 
 void RunTrees(ClientContext &context, vector<Cursor> &cursors) {
@@ -1606,16 +1658,21 @@ void TruthRankFunction(DataChunk &args, ExpressionState &state, Vector &result) 
 		if (levels.size() < 2 || levels.size() > 16) {
 			throw InvalidInputException("truth_rank needs 2 to 16 levels");
 		}
-		Json criteria = Json::Object();
+		Json criteria = Json::Array();
 		for (auto &level : levels) {
 			if (level.IsNull()) {
 				throw InvalidInputException("truth_rank levels must be text");
 			}
 			auto label = Trim(StringValue::Get(level));
-			if (label.empty() || criteria.Has(label)) {
+			if (label.empty()) {
 				throw InvalidInputException("truth_rank levels must be distinct and non-empty");
 			}
-			criteria.Set(label, Json::String(label));
+			for (auto &existing : criteria.arr) {
+				if (existing.IsString() && existing.str == label) {
+					throw InvalidInputException("truth_rank levels must be distinct and non-empty");
+				}
+			}
+			criteria.arr.push_back(Json::String(label));
 		}
 		string model = provider.decision_model;
 		if (args.ColumnCount() > 3) {

@@ -9,7 +9,7 @@ The extension you `LOAD` is named `rvbbit`. Functions live in the `rvbbit` schem
 ## What works in this version
 
 - `CREATE SECRET (TYPE openrouter, KEY '...')`, plus `OPENROUTER_API_KEY` if no secret is present. Optional `BASE_URL`, `DECISION_MODEL`, `CHAT_MODEL`, `EMBED_MODEL`, and `EMBED_DIM` on the secret. Settings of the same names override those. `rvbbit_embed_dim` of 0 keeps the secret or the default 1024.
-- HTTP inside the extension, through libcurl. `LOAD rvbbit` does not need httpfs. Requests share a connection cache and ask for HTTP/2. Each vector dedupes identical bodies and posts them together, bounded by `rvbbit_max_concurrency` (default 8). 429 and 5xx retry with backoff, honoring `Retry-After` up to 5 seconds. A connection failure raises; it does not come back as NULL. `vcpkg.json` pins `curl[ssl,http2]` at the extension-ci-tools baseline `2026.06.24`. This repository's CI links the system libcurl instead of compiling OpenSSL.
+- HTTP inside the extension, through libcurl. `LOAD rvbbit` does not need httpfs. Requests share a connection cache and ask for HTTP/2. Each vector dedupes identical bodies and posts them together, bounded by `rvbbit_max_concurrency` (default 8). 429 and 5xx retry with backoff, honoring `Retry-After` up to 5 seconds. A connection failure raises, and so does a non-retryable 4xx such as 401 or 403. Neither comes back as NULL. `vcpkg.json` pins `curl[ssl,http2]` at the extension-ci-tools baseline `2026.06.24`. This repository's CI links the system libcurl instead of compiling OpenSSL.
 - An in-memory LRU (`rvbbit_cache_size`, default 10000) and, when `rvbbit_cache_path` is set, a DuckDB file with a `judgments` table and a `trees` table.
 - Decisions, matched to Calliope's request shape: `POST {base}/api/alpha/decisions` with model `typesafe/jev-1.13` and contract `clover-decisions-v1`. The evidence boundary is prefixed on every non-box question.
 - `truth`, `truth_score`, `choose`, `decide`, `truth_question`, `choice_question`.
@@ -40,12 +40,12 @@ The extension you `LOAD` is named `rvbbit`. Functions live in the `rvbbit` schem
 
 ## Install and build
 
-Pinned to DuckDB **2.0.1** (`v2.0.1`, `8d78114e90a53823803660bf821f6073ac87da8c`) via the official C++ extension template. `extension-ci-tools` is the `v2.0-cyanoptera` branch. HTTP goes through DuckDB's own client, so there is no vcpkg dependency.
+Pinned to DuckDB **2.0.1** (`v2.0.1`, `8d78114e90a53823803660bf821f6073ac87da8c`) via the official C++ extension template. `extension-ci-tools` is the `v2.0-cyanoptera` branch. HTTP is this extension's libcurl client: `vcpkg.json` pins `curl[ssl,http2]` at baseline `2026.06.24`, connections are reused, HTTP/2 is requested when the peer allows it, and httpfs is not required. CI links the system libcurl instead of compiling that pin.
 
 ```sh
 git clone --recurse-submodules https://github.com/ryrobes/rvbbitduck.git
 cd rvbbitduck
-sudo apt-get install -y ninja-build build-essential python3   # once
+sudo apt-get install -y ninja-build build-essential python3 libcurl4-openssl-dev pkg-config   # once
 GEN=ninja make release
 ```
 

@@ -670,6 +670,27 @@ bool Retryable(const FetchResult &result) {
 	       result.status == 0;
 }
 
+//! 401, 403, and every other 4xx except the retryable ones (408, 429).
+bool RejectedStatus(int status) {
+	return status >= 400 && status <= 499 && status != 408 && status != 429;
+}
+
+void RejectClientError(const FetchResult &result) {
+	if (!RejectedStatus(result.status)) {
+		return;
+	}
+	string detail = "request was rejected";
+	if (result.status == 401) {
+		detail = "invalid or missing API key";
+	} else if (result.status == 403) {
+		detail = "forbidden";
+	} else if (result.status == 400) {
+		detail = "invalid request";
+	}
+	throw InvalidInputException("rvbbit: OpenRouter rejected the request (HTTP " + std::to_string(result.status) +
+	                            "): " + detail);
+}
+
 int RetryDelayMs(const FetchResult &result, int32_t base_ms, int attempt) {
 	auto marker = result.error.find("retry-after=");
 	if (marker != string::npos) {
@@ -970,6 +991,9 @@ vector<FetchResult> FetchPost(ClientContext &context, const string &kind, vector
 		options.retry_base_ms = settings.retry_base_ms;
 		options.tls_verify = settings.tls_verify;
 		unique_results = LivePostMany(context, kind, Endpoint(provider, kind), unique, provider.api_key, options);
+		for (auto &result : unique_results) {
+			RejectClientError(result);
+		}
 		vector<FetchResult> results;
 		results.reserve(bodies.size());
 		for (auto &body : bodies) {
@@ -1029,6 +1053,9 @@ vector<FetchResult> FetchPost(ClientContext &context, const string &kind, vector
 	for (auto &body : bodies) {
 		auto found = std::find(unique.begin(), unique.end(), body);
 		results.push_back(unique_results[static_cast<idx_t>(found - unique.begin())]);
+	}
+	for (auto &result : results) {
+		RejectClientError(result);
 	}
 	return results;
 }

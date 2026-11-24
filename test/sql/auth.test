@@ -1,0 +1,194 @@
+# name: test/sql/auth.test
+# description: non-retryable 4xx raises on every OpenRouter path
+# group: [sql]
+
+require rvbbit
+
+statement ok
+SET rvbbit_transport='mock';
+
+statement ok
+SET rvbbit_ignore_env=true;
+
+statement ok
+SET rvbbit_max_retries=3;
+
+statement ok
+SET rvbbit_retry_base_ms=1;
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+# NULL input never calls the provider.
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT rvbbit.truth(NULL, 'wants to cancel') IS NULL
+   AND rvbbit.sentiment(NULL) IS NULL
+   AND len(rvbbit.embed(NULL)) IS NULL;
+----
+true
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+0
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SELECT rvbbit.mock_fail_next(1, 401);
+
+statement error
+SELECT rvbbit.truth('Please cancel my appointment', 'The customer explicitly asks to cancel');
+----
+HTTP 401
+
+query I
+SELECT count(*) FROM rvbbit.http_log() WHERE status = 401;
+----
+1
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SELECT rvbbit.mock_fail_next(1, 401);
+
+statement error
+SELECT rvbbit.choose('My invoice shows a double charge', ['billing', 'technical', 'other']);
+----
+invalid or missing API key
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+1
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SELECT rvbbit.mock_fail_next(1, 401);
+
+statement error
+SELECT rvbbit.sentiment('My invoice shows a double charge for October.');
+----
+HTTP 401
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+1
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SELECT rvbbit.mock_fail_next(1, 403);
+
+statement error
+SELECT rvbbit.prompt('Please cancel', 'name the intent');
+----
+HTTP 403
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+1
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SELECT rvbbit.mock_fail_next(1, 401);
+
+statement error
+SELECT (rvbbit.decision_tree(
+    'thanks for the help today',
+    rvbbit.branch('the customer wants to cancel',
+      yes := rvbbit.leaf('retention'),
+      no := rvbbit.leaf('routine')))).label;
+----
+HTTP 401
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+1
+
+# Two questions about one state are one request. A 401 is not retried and not split.
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.mock_fail_next(1, 401);
+
+statement error
+SELECT count(*) FILTER (WHERE rvbbit.truth(state, predicate))
+FROM (VALUES
+    ('please cancel the appointment', 'the customer wants to cancel'),
+    ('please cancel the appointment', 'this is about billing')) v(state, predicate);
+----
+HTTP 401
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+1
+
+statement ok
+SET rvbbit_embed_dim=8;
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SELECT rvbbit.mock_fail_next(1, 401);
+
+statement error
+SELECT len(rvbbit.embed('please cancel'));
+----
+HTTP 401
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+1
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SELECT rvbbit.mock_fail_next(1, 400);
+
+statement error
+SELECT (rvbbit.locate('["please cancel"]', 'cancel button')).top;
+----
+HTTP 400
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+1
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SELECT rvbbit.mock_fail_next(1, 401);
+
+statement error
+SELECT rvbbit.truth_rank('The food was okay', 'How satisfied is the customer?', ['low', 'medium', 'high']);
+----
+invalid or missing API key
+
+query I
+SELECT count(*) FROM rvbbit.http_log() WHERE status = 401;
+----
+1

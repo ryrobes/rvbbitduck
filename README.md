@@ -59,7 +59,11 @@ Load a built binary:
 LOAD 'build/release/extension/rvbbit/rvbbit.duckdb_extension';
 ```
 
-From the linked `./build/release/duckdb` shell, `LOAD rvbbit` is enough.
+The `./build/release/duckdb` shell links rvbbit, so `LOAD rvbbit` works there. A stock DuckDB binary loads the shared library by path:
+
+```sql
+LOAD 'build/release/extension/rvbbit/rvbbit.duckdb_extension';
+```
 
 ## Quickstart
 

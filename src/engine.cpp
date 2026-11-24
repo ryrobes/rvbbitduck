@@ -132,6 +132,15 @@ public:
 
 	bool grammar_registered = false;
 
+	// The nested cache database shares this process with the DuckDB that loaded
+	// the extension. Destroying it from this singleton's destructor runs after
+	// DuckDB's own teardown and corrupts the heap, which fails the test runner
+	// even when every assertion passed. The OS reclaims the leak at exit.
+	~Engine() {
+		cache_con.release();
+		cache_db.release();
+	}
+
 	void Acquire(ClientContext &context) {
 		std::unique_lock<std::mutex> lock(mu);
 		while (in_flight >= limit) {

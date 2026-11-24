@@ -1,0 +1,43 @@
+# name: test/sql/cache.test
+# description: in-memory LRU and optional persistent cache table
+# group: [sql]
+
+require rvbbit
+
+statement ok
+SET rvbbit_transport='mock';
+
+statement ok
+SET rvbbit_cache_path='/tmp/rvbbitduck-test-cache.duckdb';
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT rvbbit.truth('please cancel this cached row', 'wants to cancel');
+----
+true
+
+statement ok
+SELECT rvbbit.cache_clear_memory();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT rvbbit.truth('please cancel this cached row', 'wants to cancel');
+----
+true
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+0
+
+query I
+SELECT l2_hits >= 1 AND entries >= 1 FROM rvbbit.cache_stats();
+----
+true

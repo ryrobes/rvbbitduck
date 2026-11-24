@@ -1,0 +1,82 @@
+# name: test/sql/grammar.test
+# description: opt-in grammar sugar desugars to rvbbit functions
+# group: [sql]
+
+require rvbbit
+
+statement ok
+SET rvbbit_transport='mock';
+
+query I
+SELECT rvbbit.grammar_registered();
+----
+true
+
+# Without the grammar extension, MEANS is not an operator.
+statement error
+SELECT 'please cancel the appointment' MEANS 'wants to cancel';
+----
+Parser Error
+
+statement ok
+SET active_grammar_extensions = ['rvbbit'];
+
+query I
+SELECT 'please cancel the appointment' MEANS 'wants to cancel';
+----
+true
+
+query I
+SELECT 'thanks for the help today' MEANS 'wants to cancel';
+----
+false
+
+query I
+SELECT 'please cancel the appointment' MEANS 'wants to cancel' ABOVE 0.95;
+----
+false
+
+query I
+SELECT 'this is a billing problem' ABOUT 'billing problems' > 0.5;
+----
+true
+
+query I
+SELECT 'this is a billing problem' ABOUT 'billing problems' ABOVE 0.5;
+----
+true
+
+query I
+SELECT SEMANTIC CASE ON 'please cancel the appointment'
+    WHEN 'the customer wants to cancel' ABOVE 0.8 THEN 'retention'
+    WHEN 'billing is the concern' THEN 'finance'
+    ELSE 'routine'
+END;
+----
+retention
+
+statement ok
+CREATE DECISION TREE churn AS
+    BRANCH 'Does the customer want to cancel?'
+        YES 'retention'
+        NO 'routine';
+
+query I
+SELECT (DECIDE churn FOR 'please cancel the appointment').label;
+----
+retention
+
+# The function form still works while the grammar is on.
+query I
+SELECT rvbbit.means('please cancel the appointment', 'wants to cancel');
+----
+true
+
+# Turning the grammar off restores the plain parser.
+statement ok
+SET active_grammar_extensions = [];
+
+statement error
+SELECT 'please cancel the appointment' MEANS 'wants to cancel';
+----
+Parser Error

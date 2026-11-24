@@ -1,0 +1,202 @@
+# name: test/sql/decisions.test
+# description: mocked Jev decisions, batching, cache, and lazy trees
+# group: [sql]
+
+require rvbbit
+
+statement ok
+SET rvbbit_transport='mock';
+
+statement ok
+SET rvbbit_retry_base_ms=1;
+
+statement ok
+SELECT rvbbit.mock_reset();
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT rvbbit.truth('please cancel the appointment', 'the customer wants to cancel');
+----
+true
+
+query I
+SELECT rvbbit.truth('thanks for the help today', 'the customer wants to cancel');
+----
+false
+
+query I
+SELECT rvbbit.truth('please cancel the appointment', 'the customer wants to cancel', 0.95);
+----
+false
+
+query I
+SELECT rvbbit.truth_score('please cancel the appointment', 'the customer wants to cancel') > 0.8;
+----
+true
+
+# Two distinct states. The repeated cancel predicate, including truth_score, is cached.
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+2
+
+query I
+SELECT rvbbit.choose('this is a billing problem', ['billing', 'technical', 'other']);
+----
+billing
+
+query I
+SELECT rvbbit.choose('nothing matches here', ['billing', 'technical', 'other']);
+----
+other
+
+statement error
+SELECT rvbbit.choose('hello there', ['only']);
+----
+2 to 16
+
+statement error
+SELECT rvbbit.truth('hello there', 'says hello', 2);
+----
+threshold
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT rvbbit.truth(NULL, 'the customer wants to cancel');
+----
+NULL
+
+# Identical inputs in one chunk are one request. Rows 1 and 4 share a body.
+statement ok
+CREATE TABLE tickets(id INTEGER, body VARCHAR);
+
+statement ok
+INSERT INTO tickets VALUES
+    (1, 'please cancel this'),
+    (2, 'thanks for the help'),
+    (3, 'please cancel again'),
+    (4, 'please cancel this');
+
+query I
+SELECT count(*) FROM tickets WHERE rvbbit.truth(body, 'wants to cancel');
+----
+3
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+3
+
+# Retries: one 429, then the mock judgment.
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SELECT rvbbit.mock_fail_next(1, 429);
+
+query I
+SELECT rvbbit.truth('please cancel this order', 'wants to cancel');
+----
+true
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+2
+
+# Lazy tree: the yes leaf is taken and the no branch is not judged.
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT (rvbbit.decision_tree(
+    'please cancel this subscription',
+    rvbbit.branch('Does the customer want to cancel?',
+        yes := rvbbit.leaf('retention'),
+        no := rvbbit.branch('Is billing the concern?',
+            yes := rvbbit.leaf('finance'),
+            no := rvbbit.leaf('routine'))))).label;
+----
+retention
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+1
+
+query I
+SELECT (rvbbit.decision_tree(
+    'thanks for the help today',
+    rvbbit.branch('Does the customer want to cancel?',
+        yes := rvbbit.leaf('retention'),
+        no := rvbbit.leaf('routine')))).label;
+----
+routine
+
+query I
+SELECT (rvbbit.decision_tree(
+    'this is a billing problem',
+    rvbbit.choice_branch('Which desk?',
+        '{"billing":"money problems","other":"everything else"}',
+        '{"billing":{"kind":"leaf","label":"pay"},"other":{"kind":"leaf","label":"misc"}}'))).label;
+----
+pay
+
+query I
+SELECT (rvbbit.decision_tree(
+    '{"note":"hello"}',
+    rvbbit.branch('Does the customer want to cancel?',
+        yes := rvbbit.leaf('retention'),
+        no := rvbbit.leaf('routine'),
+        inputs := ['account']))).status;
+----
+missing_input
+
+query I
+SELECT (rvbbit.decision_tree(
+    'please cancel this subscription',
+    rvbbit.branch('Does the customer want to cancel?',
+        yes := rvbbit.branch('Is billing the concern?',
+            yes := rvbbit.leaf('finance'),
+            no := rvbbit.leaf('retention')),
+        no := rvbbit.leaf('routine')),
+    1)).status;
+----
+budget_exhausted
+
+# Named trees are ordinary reusable values.
+statement ok
+SELECT rvbbit.save_tree('churn', rvbbit.branch(
+    'Does the customer want to cancel?',
+    yes := rvbbit.leaf('retention'),
+    no := rvbbit.leaf('routine')));
+
+query I
+SELECT (rvbbit.run_tree('churn', 'please cancel this subscription')).label;
+----
+retention
+
+query I
+SELECT (rvbbit.semantic_case(
+    'please cancel this subscription',
+    ['Does the customer want to cancel?', 'Is billing the concern?'],
+    ['retention', 'finance'],
+    'routine'));
+----
+retention
+
+# Plain SQL still composes. The grammar file covers the opt-in sugar.
+query I
+SELECT count(*)
+FROM tickets
+WHERE rvbbit.truth(body, 'wants to cancel')
+   OR rvbbit.choose(body, ['billing', 'other']) = 'billing';
+----
+3

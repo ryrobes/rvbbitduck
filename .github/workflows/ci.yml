@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: DuckDB 2.0.1 Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Ninja
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build python3
+
+      - name: Build
+        run: GEN=ninja make release -j$(nproc)
+        env:
+          CC: gcc
+          CXX: g++
+          # Do not skip the unittest binary. The makefile only skips when this is exactly 0.
+          LINUX_CI_IN_DOCKER: 1
+
+      - name: Test
+        run: GEN=ninja make test
+        env:
+          CC: gcc
+          CXX: g++
+          LINUX_CI_IN_DOCKER: 1
+
+      - name: Live smoke is skipped without a key
+        run: |
+          if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+            echo "OPENROUTER_API_KEY is set; refusing to spend it in CI"
+            exit 1
+          fi
+          ./scripts/live_smoke.sh

@@ -1,0 +1,73 @@
+# name: test/sql/llm.test
+# description: mocked chat operators
+# group: [sql]
+
+require rvbbit
+
+statement ok
+SET rvbbit_transport='mock';
+
+statement ok
+SELECT rvbbit.mock_reset();
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+query I
+SELECT rvbbit.means('please cancel this order immediately', 'customer wants to cancel');
+----
+true
+
+query I
+SELECT rvbbit.means('thanks for the help today', 'customer wants to cancel');
+----
+false
+
+query I
+SELECT rvbbit.about('this is a billing problem', 'billing problems') > 0.5;
+----
+true
+
+query I
+SELECT rvbbit.about('thanks for the help today', 'billing problems') < 0.2;
+----
+true
+
+query I
+SELECT rvbbit.extract('Order number is 12345 today', 'the order number');
+----
+12345
+
+query I
+SELECT rvbbit.extract('no digits in this note', 'the order number');
+----
+NULL
+
+query I
+SELECT starts_with(rvbbit.summarize('revenue grew in asia while america declined'), 'Summary of:');
+----
+true
+
+query I
+SELECT starts_with(rvbbit.prompt('please cancel', 'reply with the intent'), 'answer:');
+----
+true
+
+query I
+SELECT rvbbit.classify('the shipping delay was long', 'billing,shipping,other');
+----
+shipping
+
+# A second identical means call is served from the cache.
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT rvbbit.means('please cancel this order immediately', 'customer wants to cancel');
+----
+true
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+0

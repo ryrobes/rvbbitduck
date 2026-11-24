@@ -1,0 +1,77 @@
+# name: test/sql/builders.test
+# description: inert decision-tree constructors and question builders
+# group: [sql]
+
+require rvbbit
+
+query I
+SELECT contains(rvbbit.leaf('service intervention'), '"kind":"leaf"')
+   AND contains(rvbbit.leaf('service intervention'), '"label":"service intervention"');
+----
+true
+
+query I
+SELECT contains(rvbbit.branch(
+    'Does this customer show meaningful churn risk?',
+    yes := rvbbit.leaf('service intervention'),
+    no := rvbbit.leaf('routine follow-up'),
+    threshold := 0.8), '"threshold":0.8');
+----
+true
+
+query I
+SELECT contains(rvbbit.choice_branch(
+    'Which desk?',
+    '{"billing":"money","other":"else"}',
+    '{"billing":{"kind":"leaf","label":"pay"},"other":{"kind":"leaf","label":"misc"}}'), '"kind":"choice"');
+----
+true
+
+query I
+SELECT contains(rvbbit.truth_question('  asks to cancel  '), '"type":"noul"')
+   AND contains(rvbbit.truth_question('  asks to cancel  '), 'asks to cancel');
+----
+true
+
+statement error
+SELECT rvbbit.leaf('');
+----
+leaf label
+
+statement error
+SELECT rvbbit.branch('q', rvbbit.leaf('a'), rvbbit.leaf('b'), 1.5);
+----
+threshold
+
+statement error
+SELECT rvbbit.choice_branch('q', '{"only":"one"}', '{"only":{"kind":"leaf","label":"x"}}');
+----
+2 to 16
+
+statement error
+SELECT rvbbit.truth_question('');
+----
+predicate
+
+# A leaf is a complete tree and does not call the provider.
+query I
+SELECT (rvbbit.decision_tree('anything', rvbbit.leaf('kept'))).label;
+----
+kept
+
+query I
+SELECT (rvbbit.decision_tree('anything', rvbbit.leaf('kept'))).status;
+----
+complete
+
+query I
+SELECT (rvbbit.decision_tree('anything', rvbbit.leaf('kept'))).steps;
+----
+0
+
+query I
+SELECT length((rvbbit.decision_tree('left', rvbbit.leaf('kept'))).tree_id) = 32
+   AND (rvbbit.decision_tree('left', rvbbit.leaf('kept'))).tree_id
+     = (rvbbit.decision_tree('right', rvbbit.leaf('kept'))).tree_id;
+----
+true

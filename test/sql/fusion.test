@@ -1,0 +1,70 @@
+# name: test/sql/fusion.test
+# description: same-state decision questions share one OpenRouter request
+# group: [sql]
+
+require rvbbit
+
+statement ok
+SET rvbbit_transport='mock';
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT count(*) FILTER (WHERE rvbbit.truth(state, predicate))
+FROM (VALUES
+    ('please cancel the appointment', 'the customer wants to cancel'),
+    ('please cancel the appointment', 'this is about billing')) v(state, predicate);
+----
+1
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+1
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT count(*) FILTER (WHERE rvbbit.truth(state, 'the customer wants to cancel'))
+FROM (VALUES
+    ('please cancel the appointment'),
+    ('thanks for the help today')) v(state);
+----
+1
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+2
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT count(*) FILTER (WHERE label = 'yes')
+FROM (
+    SELECT (rvbbit.decision_tree(state, tree)).label AS label
+    FROM (VALUES
+        ('please cancel the appointment',
+         rvbbit.branch('the customer wants to cancel', rvbbit.leaf('yes'), rvbbit.leaf('no'))),
+        ('please cancel the appointment',
+         rvbbit.branch('this is about billing', rvbbit.leaf('bill'), rvbbit.leaf('other')))) v(state, tree)
+);
+----
+1
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+1

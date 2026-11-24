@@ -137,6 +137,21 @@ arena_ptr<TransformResultValue> FinalizeAtom(PEGTransformer &transformer, ParseR
 	return transformer.MakeResult<unique_ptr<ParsedExpression>>(std::move(expr));
 }
 
+arena_ptr<TransformResultValue> FinalizeRelation(PEGTransformer &transformer, ParseResult &parse_result) {
+	auto &list = parse_result.Cast<ListParseResult>();
+	if (list.GetChildren().size() < 3) {
+		BadShape(parse_result, "relation");
+	}
+	auto word = Lower(AsIdentifier(list.GetChild(1)));
+	if (word != "contradicts" && word != "supports" && word != "implies") {
+		throw ParserException("expected CONTRADICTS, SUPPORTS, or IMPLIES, got '%s'", word);
+	}
+	vector<unique_ptr<ParsedExpression>> args;
+	args.push_back(AsExpression(transformer, list.GetChild(0)));
+	args.push_back(AsExpression(transformer, list.GetChild(2)));
+	return transformer.MakeResult<unique_ptr<ParsedExpression>>(Call(word, std::move(args)));
+}
+
 arena_ptr<TransformResultValue> FinalizeMeans(PEGTransformer &transformer, ParseResult &parse_result) {
 	auto &list = parse_result.Cast<ListParseResult>();
 	if (list.GetChildren().size() < 4) {
@@ -165,7 +180,13 @@ arena_ptr<TransformResultValue> FinalizeMeans(PEGTransformer &transformer, Parse
 		return transformer.MakeResult<unique_ptr<ParsedExpression>>(make_uniq<ComparisonExpression>(
 		    ExpressionType::COMPARE_GREATERTHAN, std::move(about), std::move(threshold)));
 	}
-	throw ParserException("expected MEANS or ABOUT, got '%s'", word);
+	if (word == "contradicts" || word == "supports" || word == "implies") {
+		if (above.HasResult()) {
+			throw ParserException("%s does not take ABOVE", word);
+		}
+		return transformer.MakeResult<unique_ptr<ParsedExpression>>(Call(word, std::move(args)));
+	}
+	throw ParserException("expected MEANS, ABOUT, CONTRADICTS, SUPPORTS, or IMPLIES, got '%s'", word);
 }
 
 arena_ptr<TransformResultValue> FinalizeSemanticCase(PEGTransformer &transformer, ParseResult &parse_result) {
@@ -295,6 +316,13 @@ public:
 		    [](PEGTransformer &transformer, ParseResult &result) {
 			    return Start(transformer, result, FinalizeCreateTree);
 		    }));
+		changes.push_back(GrammarChange::AddRule(
+		    "RvbbitRelationExpr <- RvbbitAtom Identifier RvbbitAtom",
+		    [](PEGTransformer &transformer, ParseResult &result) {
+			    return Start(transformer, result, FinalizeRelation);
+		    }));
+		// Relation is prepended first so MEANS/ABOUT (which consume ABOVE) are tried before it.
+		changes.push_back(GrammarChange::PrependChoice("SingleExpression", "RvbbitRelationExpr"));
 		changes.push_back(GrammarChange::PrependChoice("SingleExpression", "RvbbitMeansExpr"));
 		changes.push_back(GrammarChange::PrependChoice("SingleExpression", "RvbbitSemanticCase"));
 		changes.push_back(GrammarChange::PrependChoice("SingleExpression", "RvbbitDecideExpr"));

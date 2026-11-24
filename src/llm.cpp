@@ -266,53 +266,10 @@ string Pack(const string &system, const string &user, int max_tokens) {
 	return system + "\n\x1e" + user + "\n\x1f" + std::to_string(max_tokens);
 }
 
-void MeansFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	RunChat(args, state, result, ChatParser::YES_NO, [](const vector<string> &inputs, int &) {
-		return Pack("You are a precise binary classifier. Given a TEXT and a CRITERION, decide whether the TEXT "
-		            "expresses the CRITERION. Respond with ONLY one word — either YES or NO — and nothing else.",
-		            "CRITERION: " + inputs[1] + "\n\nTEXT: " + inputs[0] + "\n\nDoes TEXT express CRITERION?", 16);
-	});
-}
-
-void AboutFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	RunChat(args, state, result, ChatParser::SCORE, [](const vector<string> &inputs, int &) {
-		return Pack("You are a precise relevance scorer. Rate how relevant the TEXT is to the TOPIC on a scale from "
-		            "0.0 (not relevant at all) to 1.0 (entirely about it). Respond with ONLY the number — for example "
-		            "\"0.73\" — and nothing else.",
-		            "TOPIC: " + inputs[1] + "\n\nTEXT: " + inputs[0] + "\n\nRelevance score (0.0 to 1.0):", 16);
-	});
-}
-
-void ExtractFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	RunChat(args, state, result, ChatParser::TEXT, [](const vector<string> &inputs, int &) {
-		return Pack("You are a precise information extractor. Given a TEXT and a description WHAT of the value to "
-		            "find, return ONLY the literal value from the text. If the value is not present, return exactly: "
-		            "NULL. No explanation, no quotes, no surrounding text.",
-		            "TEXT: " + inputs[0] + "\n\nWHAT: " + inputs[1] + "\n\nExtracted value:", 640);
-	});
-}
-
 void PromptFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	RunChat(args, state, result, ChatParser::TEXT, [](const vector<string> &inputs, int &) {
 		return Pack("You follow the instruction exactly. Return only the requested answer, with no preamble.",
 		            "INSTRUCTION: " + inputs[1] + "\n\nTEXT: " + inputs[0], 800);
-	});
-}
-
-void SummarizeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	RunChat(args, state, result, ChatParser::TEXT, [](const vector<string> &inputs, int &) {
-		return Pack("You are a concise summarizer. Summarize the given TEXT in ONE short sentence. Output ONLY the "
-		            "sentence — no preamble, no quotes, no markdown.",
-		            "TEXT: " + inputs[0] + "\n\nOne-sentence summary:", 120);
-	});
-}
-
-void ClassifyFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	RunChat(args, state, result, ChatParser::TEXT, [](const vector<string> &inputs, int &) {
-		return Pack("You are a strict classifier. Given a TEXT and a comma-separated list of CATEGORIES, return ONLY "
-		            "the single category name that best matches the TEXT. Use the exact spelling from the list. No "
-		            "explanation, no quotes, just the category name.",
-		            "CATEGORIES: " + inputs[1] + "\n\nTEXT: " + inputs[0] + "\n\nBest category:", 32);
 	});
 }
 
@@ -329,27 +286,9 @@ ScalarFunction VolatileFun(const string &name, std::initializer_list<FunctionPar
 
 void RegisterLlmFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(VolatileFun(
-	    "means",
-	    {FunctionParameter("text", LogicalType::VARCHAR), FunctionParameter("criterion", LogicalType::VARCHAR)},
-	    LogicalType::BOOLEAN, MeansFunction));
-	loader.RegisterFunction(VolatileFun(
-	    "about",
-	    {FunctionParameter("text", LogicalType::VARCHAR), FunctionParameter("topic", LogicalType::VARCHAR)},
-	    LogicalType::DOUBLE, AboutFunction));
-	loader.RegisterFunction(VolatileFun(
-	    "extract",
-	    {FunctionParameter("text", LogicalType::VARCHAR), FunctionParameter("what", LogicalType::VARCHAR)},
-	    LogicalType::VARCHAR, ExtractFunction));
-	loader.RegisterFunction(VolatileFun(
 	    "prompt",
 	    {FunctionParameter("text", LogicalType::VARCHAR), FunctionParameter("instruction", LogicalType::VARCHAR)},
 	    LogicalType::VARCHAR, PromptFunction));
-	loader.RegisterFunction(
-	    VolatileFun("summarize", {FunctionParameter("text", LogicalType::VARCHAR)}, LogicalType::VARCHAR, SummarizeFunction));
-	loader.RegisterFunction(VolatileFun(
-	    "classify",
-	    {FunctionParameter("text", LogicalType::VARCHAR), FunctionParameter("categories", LogicalType::VARCHAR)},
-	    LogicalType::VARCHAR, ClassifyFunction));
 }
 
 } // namespace rvbbit

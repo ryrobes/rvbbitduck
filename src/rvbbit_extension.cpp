@@ -19,6 +19,7 @@ namespace rvbbit {
 
 void RegisterDecisionFunctions(ExtensionLoader &loader);
 void RegisterLlmFunctions(ExtensionLoader &loader);
+void RegisterOperatorFunctions(ExtensionLoader &loader);
 void RegisterGrammar(ExtensionLoader &loader);
 
 void SetNull(Vector &result, idx_t row) {
@@ -303,6 +304,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	rvbbit::RegisterSupport(loader);
 	rvbbit::RegisterDecisionFunctions(loader);
 	rvbbit::RegisterLlmFunctions(loader);
+	rvbbit::RegisterOperatorFunctions(loader);
 	rvbbit::RegisterGrammar(loader);
 }
 

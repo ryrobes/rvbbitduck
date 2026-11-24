@@ -16,19 +16,21 @@ The extension you `LOAD` is named `rvbbit`. Functions live in the `rvbbit` schem
 - `leaf`, `branch`, `choice_branch`, `decision_tree`, `decision_tree_batch`. The tree is validated before any call. Only the path taken is judged. Statuses are `complete`, `unavailable`, `budget_exhausted`, `context_limit`, and `missing_input`.
 - `semantic_case` for a first-match list of predicates, evaluated as that same lazy tree.
 - Named trees: `save_tree`, `tree`, `run_tree`.
-- Chat operators on `{base}/api/v1/chat/completions`, default model `openai/gpt-6-luna`: `means`, `about`, `extract`, `prompt`, `summarize`, `classify`. Prompts are the seeded Calliope strings.
-- Opt-in grammar: `col MEANS '...'`, `col ABOUT '...'`, `ABOVE`, `SEMANTIC CASE`, `CREATE DECISION TREE`, `DECIDE name FOR state`. See [docs/SYNTAX.md](docs/SYNTAX.md).
+- Fused decisions. Inside one chunk, questions about the same state share a single `POST /api/alpha/decisions` (up to 8). A rejected fused call is sent again as separate requests. Different states stay separate.
+- The `rvbbit.operators()` catalog, seeded from Calliope 1.2.3: `means`, `about`, `summarize`, `classify`, `extract`, `condense`, `sentiment`, `contradicts`, `supports`, `implies`, `clean_year` (retry), `redact` (blocking post-ward), `headline` (3 takes and an evaluator), `safe_classify` (LLM step plus `validate_one_of`), and dimension lists `themes`, `tags`, `aspects`, `entities`, `keyphrases`. `prompt` stays free-form.
+- `create_operator`, `set_operator_retry`, `set_operator_wards`, and `set_operator_takes`. A custom operator becomes a macro in `main` (`ping(...)`) and is always callable as `rvbbit.exec('ping', ...)`.
+- Opt-in grammar: `MEANS`, `ABOUT`, `ABOVE`, `SUPPORTS`, `CONTRADICTS`, `IMPLIES`, `SEMANTIC CASE`, `CREATE DECISION TREE`, `DECIDE name FOR state`. See [docs/SYNTAX.md](docs/SYNTAX.md).
 
 `rvbbit_base_url` defaults to `https://openrouter.ai`. Point it at Hutch or another gateway only if that gateway serves `/api/alpha/decisions` and `/api/v1/chat/completions`.
 
 ## What is stubbed
 
-- No editable operator catalog, no retry wards, no multi-take voting, no receipt ledger, no cost reconciliation. Those are the Postgres operator engine (P2).
-- No embeddings, `semantic_case` over vectors, `knn`, HNSW, or `NEAREST` (P3). The `semantic_case` that ships here is a Jev tree, not the embedding nearest-branch from Postgres.
-- No `image_part`, `locate`, or `box_question`. The validator accepts a `box` or `score` question on `decide`, and box questions skip the evidence boundary, but there is no helper and the mock transport does not invent boxes.
-- No aggregate `classify_collection`, no dimension operators (`tags`, `themes`), no `prewarm`.
-- Cache keys are MD5 of the request body. Calliope uses blake3 for judgment keys. The identity fields match; the digest does not.
-- `tree_id` is MD5 of canonical compact JSON, not Postgres `md5(tree::jsonb::text)`.
+- `classify_collection` and any `aggregate`, `rowset`, or `query` shape are listed in the catalog and raise when called. Dimension operators return `VARCHAR[]` rather than Postgres `SETOF`.
+- SQL validators understand `btrim($output) ~ 'regex'`, `$output !~ 'regex'`, `$output =` / `<>`, `length($inputs->>'field')` comparisons, and `AND` of those. Anything outside that subset is treated as passing, which is how Calliope treats a broken validator. Function-valued validators are stored and not run.
+- Heterogeneous `takes.nodes` are stored. Execution covers homogeneous `factor` takes with `vote`, `first_valid`, `evaluator`, and `consensus`.
+- No embeddings, `knn`, HNSW, or `NEAREST` (P3). The `semantic_case` here is a Jev tree, not the embedding nearest-branch from Postgres.
+- No `image_part`, `locate`, or `box_question`. `decide` accepts a `box` or `score` question, box questions skip the evidence boundary, and the mock does not invent boxes.
+- No receipt or cost ledger, and no `prewarm`. Cache keys are MD5, not blake3. `tree_id` is MD5 of canonical compact JSON, not Postgres `md5(tree::jsonb::text)`.
 
 ## Install and build
 
@@ -106,6 +108,12 @@ CREATE DECISION TREE churn AS
     NO 'routine follow-up';
 
 SELECT (DECIDE churn FOR recent_messages).label FROM customer_contexts;
+
+-- Custom operator. ping() is a macro in main; rvbbit.exec is the qualified form.
+SELECT rvbbit.create_operator(
+  'ping', ['text'], 'text',
+  'Reply briefly.',
+  'TEXT: {{ text }}\n\nReply:');
 ```
 
 Tests set `rvbbit_transport` to `mock`. That transport never leaves the process. `rvbbit_ignore_env` stops a developer key from satisfying a missing-secret test.
@@ -151,11 +159,10 @@ It is not enough, without replacing a core expression rule, to drop a new infix 
 
 ## Next
 
-1. **P2 operator catalog.** A `rvbbit.operators` table, `create_operator` that installs a macro, the rest of the seeded prompts, parsers, and the retry / ward / takes loop. Receipts can sit in the same cache file.
-2. **P3 embeddings.** `embed` to `FLOAT[1024]`, `array_cosine_similarity`, a `knn_text` macro, and notes for `NEAREST` and the experimental vss HNSW index. The embedding `semantic_case` from Postgres belongs here, next to the Jev one, under a different name so the two are not confused.
-3. **Question fusion.** `truth(x, a)` and `choose(x, ...)` on the same `x` in one vector can share a single `/decisions` request. The API allows many questions; Calliope's service capped a batch at 8 states, not 8 questions.
-4. **Images and `score`.** `image_part` plus Jev 1.14 `locate`, and `truth_rank` for the ordered score question type Calliope has not shipped yet.
-5. **Grammar follow-ups, only if the API grows.** A real precedence slot for word operators, and a `WHEN` arm that can hold a comparison. Until then the function form stays the contract.
+1. **P3 embeddings.** `embed` to `FLOAT[1024]`, `array_cosine_similarity`, a `knn_text` macro, and notes for `NEAREST` and the experimental vss HNSW index. Keep the embedding nearest-branch under a different name from the Jev `semantic_case`.
+2. **`image_part` and `locate`.** Jev 1.14 box questions, plus `truth_rank` for the ordered score question Calliope has not shipped.
+3. **Aggregate operators** such as `classify_collection`, heterogeneous `takes.nodes`, and a receipt/cost ledger beside the judgment cache.
+4. **Grammar follow-ups, only if the API grows.** A real precedence slot for word operators, and a `WHEN` arm that can hold a comparison. Until then the function form stays the contract.
 
 ## License
 

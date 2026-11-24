@@ -302,6 +302,13 @@ string NormalizeDecision(const string &request_body, const string &response_body
 	return normalized.Dump();
 }
 
+string DecisionCacheKey(const string &body) {
+	return Md5Hex(string("decision\n") + body);
+}
+
+//! Several questions about one state become one /api/alpha/decisions call.
+//! OpenRouter accepts many named questions. A rejected fused call is retried
+//! as the original single-question requests.
 unordered_map<string, string> ResolveDecisions(ClientContext &context, const vector<string> &bodies) {
 	unordered_map<string, string> resolved;
 	vector<string> missing;
@@ -311,25 +318,157 @@ unordered_map<string, string> ResolveDecisions(ClientContext &context, const vec
 			continue;
 		}
 		string cached;
-		if (CacheGet(context, Md5Hex(string("decision\n") + body), cached)) {
+		if (CacheGet(context, DecisionCacheKey(body), cached)) {
 			resolved[body] = std::move(cached);
 		} else {
 			missing.push_back(body);
 		}
 	}
-	if (!missing.empty()) {
-		auto fetched = FetchPost(context, "decision", missing);
-		for (idx_t i = 0; i < missing.size(); i++) {
+	if (missing.empty()) {
+		return resolved;
+	}
+
+	struct Piece {
+		string body;
+		string question_name;
+		string fused_name;
+		Json question;
+	};
+	struct Group {
+		string model;
+		Json state;
+		vector<Piece> pieces;
+	};
+	vector<Group> groups;
+	vector<string> unparsed;
+	for (auto &body : missing) {
+		Json request;
+		try {
+			request = Json::Parse(body);
+		} catch (const std::exception &) {
+			unparsed.push_back(body);
+			continue;
+		}
+		auto model = request.Find("model");
+		auto state = request.Find("state");
+		auto questions = request.Find("questions");
+		if (!model || !model->IsString() || !state || !questions || !questions->IsObject() || questions->obj.empty()) {
+			unparsed.push_back(body);
+			continue;
+		}
+		string state_key = state->Dump();
+		Group *group = nullptr;
+		for (auto &candidate : groups) {
+			if (candidate.model == model->str && candidate.state.Dump() == state_key && candidate.pieces.size() < 8) {
+				group = &candidate;
+				break;
+			}
+		}
+		if (!group) {
+			groups.push_back(Group {});
+			group = &groups.back();
+			group->model = model->str;
+			group->state = *state;
+		}
+		for (auto &entry : questions->obj) {
+			Piece piece;
+			piece.body = body;
+			piece.question_name = entry.first;
+			piece.question = entry.second;
+			piece.fused_name = "q" + std::to_string(group->pieces.size());
+			group->pieces.push_back(std::move(piece));
+		}
+	}
+
+	auto store = [&](const string &body, const string &normalized) {
+		CachePut(context, DecisionCacheKey(body), normalized);
+		resolved[body] = normalized;
+	};
+	auto individually = [&](const vector<string> &alone) {
+		if (alone.empty()) {
+			return;
+		}
+		auto fetched = FetchPost(context, "decision", alone);
+		for (idx_t i = 0; i < alone.size(); i++) {
 			if (!fetched[i].ok) {
 				continue;
 			}
 			string error;
-			auto normalized = NormalizeDecision(missing[i], fetched[i].body, error);
-			if (normalized.empty()) {
+			auto normalized = NormalizeDecision(alone[i], fetched[i].body, error);
+			if (!normalized.empty()) {
+				store(alone[i], normalized);
+			}
+		}
+	};
+	individually(unparsed);
+
+	for (auto &group : groups) {
+		vector<string> originals;
+		for (auto &piece : group.pieces) {
+			if (std::find(originals.begin(), originals.end(), piece.body) == originals.end()) {
+				originals.push_back(piece.body);
+			}
+		}
+		if (group.pieces.size() < 2) {
+			individually(originals);
+			continue;
+		}
+		Json questions = Json::Object();
+		for (auto &piece : group.pieces) {
+			questions.Set(piece.fused_name, piece.question);
+		}
+		Json fused = Json::Object();
+		fused.Set("model", Json::String(group.model));
+		fused.Set("state", group.state);
+		fused.Set("questions", std::move(questions));
+		auto fused_body = fused.Dump();
+		auto fetched = FetchPost(context, "decision", {fused_body});
+		string error;
+		string normalized = fetched[0].ok ? NormalizeDecision(fused_body, fetched[0].body, error) : "";
+		Json parsed;
+		bool fused_ok = false;
+		if (!normalized.empty()) {
+			try {
+				parsed = Json::Parse(normalized);
+				fused_ok = parsed.Find("answers") != nullptr;
+			} catch (const std::exception &) {
+				fused_ok = false;
+			}
+		}
+		if (!fused_ok) {
+			individually(originals);
+			continue;
+		}
+		auto answers = parsed.Find("answers");
+		for (auto &body : originals) {
+			Json kept = Json::Object();
+			for (auto &piece : group.pieces) {
+				if (piece.body != body) {
+					continue;
+				}
+				auto answer = answers->Find(piece.fused_name);
+				if (!answer) {
+					kept = Json::Object();
+					break;
+				}
+				kept.Set(piece.question_name, *answer);
+			}
+			if (kept.obj.empty()) {
 				continue;
 			}
-			CachePut(context, Md5Hex(string("decision\n") + missing[i]), normalized);
-			resolved[missing[i]] = std::move(normalized);
+			Json one = Json::Object();
+			if (auto model = parsed.Find("model")) {
+				one.Set("model", *model);
+			}
+			if (auto requested = parsed.Find("requested_model")) {
+				one.Set("requested_model", *requested);
+			}
+			one.Set("contract", Json::String(DECISION_CONTRACT));
+			one.Set("answers", std::move(kept));
+			if (auto usage = parsed.Find("usage")) {
+				one.Set("usage", *usage);
+			}
+			store(body, one.Dump());
 		}
 	}
 	return resolved;

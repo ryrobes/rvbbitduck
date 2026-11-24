@@ -47,6 +47,16 @@ SELECT 'this is a billing problem' ABOUT 'billing problems' ABOVE 0.5;
 true
 
 query I
+SELECT 'please cancel the order' SUPPORTS 'wants to cancel';
+----
+true
+
+query I
+SELECT 'thanks for the help today' CONTRADICTS 'please cancel the order';
+----
+false
+
+query I
 SELECT SEMANTIC CASE ON 'please cancel the appointment'
     WHEN 'the customer wants to cancel' ABOVE 0.8 THEN 'retention'
     WHEN 'billing is the concern' THEN 'finance'

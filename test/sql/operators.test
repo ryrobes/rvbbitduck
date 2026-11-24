@@ -1,0 +1,158 @@
+# name: test/sql/operators.test
+# description: operator catalog, retry, wards, takes, and custom operators
+# group: [sql]
+
+require rvbbit
+
+statement ok
+SET rvbbit_transport='mock';
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+query I
+SELECT count(*) >= 20 FROM rvbbit.operators();
+----
+true
+
+query I
+SELECT infix_word FROM rvbbit.operators() WHERE name = 'means';
+----
+MEANS
+
+query I
+SELECT has_retry FROM rvbbit.operators() WHERE name = 'clean_year';
+----
+true
+
+query I
+SELECT has_wards FROM rvbbit.operators() WHERE name = 'redact';
+----
+true
+
+query I
+SELECT has_takes FROM rvbbit.operators() WHERE name = 'headline';
+----
+true
+
+query I
+SELECT has_steps FROM rvbbit.operators() WHERE name = 'safe_classify';
+----
+true
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT rvbbit.clean_year('the album shipped in 97');
+----
+1997
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+2
+
+query I
+SELECT contains(rvbbit.redact('mail ada@example.com today'), '[EMAIL]')
+   AND NOT contains(rvbbit.redact('mail ada@example.com today'), 'ada@example.com');
+----
+true
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+query I
+SELECT starts_with(rvbbit.headline('please cancel the billing problem'), 'Headline:');
+----
+true
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+4
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT starts_with(rvbbit.headline('please cancel the billing problem'), 'Headline:');
+----
+true
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+0
+
+query I
+SELECT rvbbit.safe_classify('the shipping delay was long', 'billing,shipping,other');
+----
+shipping
+
+query I
+SELECT rvbbit.sentiment('please cancel this order');
+----
+negative
+
+query I
+SELECT contains(array_to_string(rvbbit.themes('please cancel the billing problem'), ','), 'Cancellation')
+   AND contains(array_to_string(rvbbit.themes('please cancel the billing problem'), ','), 'Billing');
+----
+true
+
+statement error
+SELECT rvbbit.classify_collection('please cancel', 'billing,other');
+----
+not executed
+
+query I
+SELECT rvbbit.create_operator(
+    'ping',
+    ['text'],
+    'text',
+    'Reply briefly.',
+    'TEXT: {{ text }}\n\nReply:');
+----
+macro
+
+query I
+SELECT starts_with(ping('hello there'), 'answer:');
+----
+true
+
+query I
+SELECT starts_with(rvbbit.exec('ping', 'hello there'), 'answer:');
+----
+true
+
+statement ok
+SELECT rvbbit.set_operator_wards(
+    'ping',
+    '{"pre":[{"validator":{"sql":"length($inputs->>''text'') > 0"},"mode":"blocking"}]}');
+
+statement error
+SELECT rvbbit.exec('ping', '');
+----
+pre-ward
+
+statement ok
+SELECT rvbbit.create_operator(
+    'echo_mail',
+    ['text'],
+    'text',
+    'Echo the text.',
+    'TEXT: {{ text }}');
+
+statement ok
+SELECT rvbbit.set_operator_wards(
+    'echo_mail',
+    '{"post":[{"validator":{"sql":"$output !~ ''[A-Za-z0-9._%+-]+@[A-Za-z0-9._-]+''"},"mode":"blocking"}]}');
+
+query I
+SELECT rvbbit.exec('echo_mail', 'mail ada@example.com today');
+----
+NULL

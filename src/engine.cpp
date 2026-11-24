@@ -498,6 +498,101 @@ string MockChatContent(const Json &request) {
 		auto b = Between(user, "B:", "Does A");
 		return Overlaps(a, b) ? "YES" : "NO";
 	}
+	if (user.find("\n\nYear:") != string::npos) {
+		auto text = Between(user, "TEXT:", "Year:");
+		auto year_of = [](const string &blob) {
+			for (size_t i = 0; i + 4 <= blob.size(); i++) {
+				if (std::isdigit(static_cast<unsigned char>(blob[i])) &&
+				    std::isdigit(static_cast<unsigned char>(blob[i + 1])) &&
+				    std::isdigit(static_cast<unsigned char>(blob[i + 2])) &&
+				    std::isdigit(static_cast<unsigned char>(blob[i + 3])) &&
+				    (i == 0 || !std::isdigit(static_cast<unsigned char>(blob[i - 1])))) {
+					return blob.substr(i, 4);
+				}
+			}
+			for (size_t i = 0; i + 2 <= blob.size(); i++) {
+				if (std::isdigit(static_cast<unsigned char>(blob[i])) &&
+				    std::isdigit(static_cast<unsigned char>(blob[i + 1])) &&
+				    (i == 0 || !std::isdigit(static_cast<unsigned char>(blob[i - 1]))) &&
+				    (i + 2 == blob.size() || !std::isdigit(static_cast<unsigned char>(blob[i + 2])))) {
+					int yy = (blob[i] - '0') * 10 + (blob[i + 1] - '0');
+					return std::to_string(yy >= 30 ? 1900 + yy : 2000 + yy);
+				}
+			}
+			return string("unknown");
+		};
+		// The first attempt is deliberately invalid so the retry plan runs.
+		if (user.find("not a valid year") == string::npos && user.find("previous answer") == string::npos) {
+			return "nope";
+		}
+		return year_of(text);
+	}
+	if (user.find("Redacted text:") != string::npos) {
+		auto text = Between(user, "TEXT:", "Redacted");
+		string out;
+		for (size_t i = 0; i < text.size();) {
+			auto at = text.find('@', i);
+			if (at == string::npos || at == 0) {
+				out.append(text, i, string::npos);
+				break;
+			}
+			size_t start = at;
+			while (start > 0 && text[start - 1] != ' ') {
+				start--;
+			}
+			size_t end = at + 1;
+			while (end < text.size() && text[end] != ' ') {
+				end++;
+			}
+			out.append(text, i, start - i);
+			out += "[EMAIL]";
+			i = end;
+		}
+		return out;
+	}
+	if (user.find("\n\nHeadline:") != string::npos) {
+		auto text = Between(user, "TEXT:", "Headline:");
+		if (text.size() > 48) {
+			text = text.substr(0, 48);
+		}
+		return "Headline: " + text;
+	}
+	if (user.find("CANDIDATE ANSWERS:") != string::npos || user.find("ONLY the number") != string::npos) {
+		return "1";
+	}
+	if (user.find("\n\nSentiment:") != string::npos) {
+		auto text = LowerCopy(Between(user, "TEXT:", "Sentiment:"));
+		if (text.find("cancel") != string::npos || text.find("angry") != string::npos ||
+		    text.find("terrible") != string::npos) {
+			return "negative";
+		}
+		if (text.find("thanks") != string::npos || text.find("love") != string::npos) {
+			return "positive";
+		}
+		return "neutral";
+	}
+	if (user.find("JSON array") != string::npos) {
+		auto lower = LowerCopy(user);
+		string items;
+		auto add = [&](const char *word, const char *label) {
+			if (lower.find(word) == string::npos) {
+				return;
+			}
+			if (!items.empty()) {
+				items += ",";
+			}
+			items += "\"";
+			items += label;
+			items += "\"";
+		};
+		add("cancel", "Cancellation");
+		add("billing", "Billing");
+		add("shipping", "Shipping");
+		if (items.empty()) {
+			return "[\"General\"]";
+		}
+		return "[" + items + "]";
+	}
 	auto text = Between(user, "TEXT:", "INSTRUCTION:");
 	if (text.empty()) {
 		text = user;

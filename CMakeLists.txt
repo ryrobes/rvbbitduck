@@ -20,6 +20,7 @@ set(EXTENSION_SOURCES
     src/engine.cpp
     src/decisions.cpp
     src/llm.cpp
+    src/operators.cpp
     src/grammar.cpp
     src/rvbbit_extension.cpp)
 

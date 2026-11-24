@@ -15,6 +15,7 @@ Calliope 1.2.3 is the behavior reference. Where Postgres could not express somet
 | Pick a label | `rvbbit.choose(body, ARRAY['billing','other'])` | `rvbbit.choose(body, ['billing','other'])` | same function; no infix |
 | One-sentence summary | `rvbbit.summarize(body)` | `rvbbit.summarize(body)` | same function |
 | Pull a value out | `rvbbit.extract(body, 'the order number')` | `rvbbit.extract(body, 'the order number')` | same function |
+| Relation | `rvbbit.supports(a, b)` | `rvbbit.supports(a, b)` | `a SUPPORTS 'b'` or `a SUPPORTS b` |
 | Free-form instruction | a catalog operator | `rvbbit.prompt(body, 'reply with the intent')` | same function |
 
 Turn the sugar on for the session:
@@ -26,7 +27,7 @@ SET active_grammar_extensions = ['rvbbit'];
 
 `SET active_grammar_extensions = []` turns it back off. Nothing in the function API changes.
 
-`MEANS` and `ABOUT` stay identifiers, not reserved words, so `rvbbit.means(...)` still parses while the grammar is on. `DECIDE`, `SEMANTIC`, `ABOVE`, `DECISION`, and `TREE` are added as unreserved keywords only while the grammar is active. They can still be column names. A function literally named `decide` would not resolve through the generic function rule; the plain name for a stored tree is `rvbbit.run_tree`.
+`MEANS`, `ABOUT`, `SUPPORTS`, `CONTRADICTS`, and `IMPLIES` stay identifiers, not reserved words, so `rvbbit.means(...)` still parses while the grammar is on. `DECIDE`, `SEMANTIC`, `ABOVE`, `DECISION`, and `TREE` are added as unreserved keywords only while the grammar is active. They can still be column names. A function literally named `decide` would not resolve through the generic function rule; the plain name for a stored tree is `rvbbit.run_tree`.
 
 ## Decisions
 
@@ -154,6 +155,54 @@ SELECT SEMANTIC CASE ON body
 FROM tickets;
 ```
 
+## Operator catalog
+
+`SELECT * FROM rvbbit.operators()` lists the seeded Calliope 1.2.3 operators. `means`, `about`, and the other scalar names call whatever prompt is stored there, so an edit is visible on the next call. Dimension operators (`themes`, `tags`, `aspects`, `entities`, `keyphrases`) return `VARCHAR[]`; unnest them when you want one row per label.
+
+```sql
+SELECT rvbbit.set_operator_retry(
+  'clean_year',
+  '{"until":{"sql":"btrim($output) ~ ''^((1[6-9]|20)[0-9]{2}|unknown)$''"},"max_attempts":3,"instructions":"Reply with a 4-digit year or unknown"}');
+
+SELECT rvbbit.set_operator_wards(
+  'redact',
+  '{"post":[{"validator":{"sql":"$output !~ ''[A-Za-z0-9._%+-]+@[A-Za-z0-9._-]+''"},"mode":"blocking"}]}');
+
+SELECT rvbbit.set_operator_takes(
+  'headline',
+  '{"factor":3,"reduce":"evaluator","evaluator":{"instructions":"Reply with only the number of the best headline."}}');
+```
+
+Order of a call: pre-wards, then takes (or one chat), then retry, then post-wards. A blocking pre-ward raises. A blocking post-ward returns NULL and is not cached. Retry does not repeat a transport failure. `vote`, `first_valid`, `evaluator`, and `consensus` are the reducers. `max_attempts` includes the first try.
+
+The `rvbbit` schema cannot hold new macros. `create_operator` writes a macro in `main` and always leaves `rvbbit.exec('name', ...)` working:
+
+```sql
+SELECT rvbbit.create_operator(
+  'ping', ['text'], 'text',
+  'Reply briefly.',
+  'TEXT: {{ text }}\n\nReply:');
+
+SELECT ping('hello');
+SELECT rvbbit.exec('ping', 'hello');
+```
+
+`{{ arg }}`, `{{ inputs.arg }}`, and `{{ steps.name.output }}` are the template fields. `safe_classify` is the seeded two-step operator: an LLM call, then the `validate_one_of` code step.
+
+## Fused decisions
+
+A single `truth` or `decision_tree` call sees up to 2048 rows. Rows that share a state and differ only in the question are one `POST /api/alpha/decisions`. The cap is 8 questions per request. Two different states stay two requests. If the fused response is rejected, those questions are sent again one by one.
+
+```sql
+SELECT rvbbit.truth(state, predicate)
+FROM (VALUES
+  ('please cancel the appointment', 'the customer wants to cancel'),
+  ('please cancel the appointment', 'this is about billing')) v(state, predicate);
+-- one HTTP request, two answers
+```
+
+Separate expressions in the same SELECT (`truth(...)` next to `choose(...)`) are separate function calls. They still share the cache when the request body matches. Put both questions in `rvbbit.decide(state, questions)` when you want them fused on purpose.
+
 ## Composition
 
 These are scalar expressions. They sit in `WHERE`, `CASE`, `JOIN`, and `GROUP BY` without a special scan.
@@ -182,7 +231,7 @@ DuckDB 2.0.1's `GrammarExtension` is opt-in (`active_grammar_extensions`) and C+
 - `PrependChoice` on `SingleExpression` for `MEANS` / `ABOUT`, `SEMANTIC CASE`, and `DECIDE name FOR state`.
 - `AddChoice` on `Statement` for `CREATE DECISION TREE`.
 
-`MEANS` and `ABOUT` are not keywords. The expression is `atom identifier string-literal`, and the transform accepts only those two words. That keeps `rvbbit.means(...)` working, because the function-name rule still wants an identifier. The left side has to be a column, literal, function call, parenthesized expression, struct, or `CASE`. `lower(body) MEANS 'x'` works. `a || b MEANS 'x'` does not; parenthesize the left side.
+`MEANS` and `ABOUT` are not keywords. The expression is `atom identifier string-literal`, and the transform accepts only those two words. That keeps `rvbbit.means(...)` working, because the function-name rule still wants an identifier. The left side has to be a column, literal, function call, parenthesized expression, struct, or `CASE`. `lower(body) MEANS 'x'` works. `a || b MEANS 'x'` does not; parenthesize the left side. `SUPPORTS`, `CONTRADICTS`, and `IMPLIES` use the same shape. `ABOVE` applies to `MEANS` and `ABOUT` only.
 
 `ABOVE` is a keyword, so it can follow the string. `MEANS ... ABOVE n` becomes `rvbbit.truth(left, right, n)`. `ABOUT ... ABOVE n` becomes `rvbbit.about(left, right) > n`.
 

@@ -189,6 +189,77 @@ SELECT rvbbit.exec('ping', 'hello');
 
 `{{ arg }}`, `{{ inputs.arg }}`, and `{{ steps.name.output }}` are the template fields. `safe_classify` is the seeded two-step operator: an LLM call, then the `validate_one_of` code step.
 
+## Embeddings
+
+`rvbbit.embed(text)` returns `FLOAT[]`. The length is `rvbbit_embed_dim` when that setting is at least 2, otherwise the secret's `EMBED_DIM`, otherwise 1024. The request is OpenAI-shaped:
+
+```json
+{"model":"voyageai/voyage-4","input":["..."],"dimensions":1024}
+```
+
+`POST {base}/api/v1/embeddings`. Identical texts in one chunk share one slot. Misses go out in batches of 64. The cache key is the model, the dimension, and the text after Calliope's mode prefix. `embed(text, 'query')` prefixes nomic (`search_query:` / `search_document:`), e5 (`query:` / `passage:`), and bge (the query instruction). An empty mode, and every other model, sends the raw text. `knn_text` and the composites embed raw, the same way Calliope's generic path does, so they share one vector space.
+
+| Calliope | Here | Returns |
+|---|---|---|
+| `rvbbit.embed` | `rvbbit.embed(text [, mode])` | `FLOAT[]` |
+| `rvbbit.similarity` | `rvbbit.similarity(a, b)` | cosine |
+| `rvbbit.knn_text(rel, col, query, k)` | `rvbbit.knn_text(query, texts, k)` | `value`, `score` |
+| embedding `semantic_case` | `rvbbit.nearest_label(text, conditions, results, otherwise, min_score)` | the winning label, or `otherwise` below `min_score` |
+| `rvbbit.topics` | `rvbbit.topics(texts, k)` | `cluster_id`, `size`, `exemplar` |
+| `rvbbit.dedupe_groups` | `rvbbit.dedupe_groups(texts [, threshold])` | `group_id`, `representative`, `size`, `members` |
+| `rvbbit.diff` | `rvbbit.diff(a, b, k)` | `text`, `novelty` (`1 - max cosine`) |
+
+`semantic_case` remains the Jev tree. `nearest_label` is the cosine argmax.
+
+DuckDB already has the join. The query row is the left side; `NEAREST k` keeps k rows of the right side:
+
+```sql
+SELECT d.text
+FROM (SELECT rvbbit.embed('cancel my subscription')::FLOAT[1024] AS embedding) q
+JOIN docs d
+NEAREST 1 BY SIMILARITY array_cosine_similarity(q.embedding, d.embedding);
+```
+
+`array_cosine_similarity` wants `FLOAT[N]`, and so does an HNSW index. Cast when the list length is N:
+
+```sql
+ALTER TABLE docs ADD COLUMN embedding FLOAT[1024];
+UPDATE docs SET embedding = rvbbit.embed(text)::FLOAT[1024];
+
+INSTALL vss;
+LOAD vss;
+CREATE INDEX docs_hnsw ON docs USING HNSW (embedding) WITH (metric = 'cosine');
+```
+
+vss is not part of this extension. CI checks the cast and the brute-force `NEAREST` join with the mock embedder. It does not load vss.
+
+With the grammar on, `a NEAR 'b'` is `rvbbit.similarity(a, 'b')`, and `a NEAR 'b' ABOVE 0.8` is that cosine compared with `0.8`. The function form does not need the grammar.
+
+## Images and ranks
+
+`image_part` wraps a picture the way Calliope does. It does not call the network.
+
+```sql
+SELECT rvbbit.image_part(photo);  -- BLOB whose signature is PNG or JPEG
+SELECT rvbbit.box_question('the visible damage');
+```
+
+`locate` builds that box question and sends it to `typesafe/jev-1.14`. Pass a model only when you want a different one. Box instructions are not prefixed with the evidence boundary. The result is a struct of fractions of the image. A box comes back even when the target is absent; pair it with `truth` if you need a yes or no.
+
+```sql
+SELECT (rvbbit.locate(
+          '[' || rvbbit.image_part(photo) || ']',
+          'the visible damage')).top
+FROM listings;
+```
+
+`truth_rank(state, question, levels)` sends a score question whose criteria are the level names, and returns the chosen name. Calliope 1.2.3 does not ship this question. The request matches the score branch `decide` already accepts: `type` `score`, a `criteria` object, and an answer `score` that is one of those keys. The evidence boundary is applied, unlike a box.
+
+```sql
+SELECT rvbbit.truth_rank(body, 'how urgent is this', ['low', 'medium', 'high'])
+FROM tickets;
+```
+
 ## Fused decisions
 
 A single `truth` or `decision_tree` call sees up to 2048 rows. Rows that share a state and differ only in the question are one `POST /api/alpha/decisions`. The cap is 8 questions per request. Two different states stay two requests. If the fused response is rejected, those questions are sent again one by one.
@@ -231,9 +302,9 @@ DuckDB 2.0.1's `GrammarExtension` is opt-in (`active_grammar_extensions`) and C+
 - `PrependChoice` on `SingleExpression` for `MEANS` / `ABOUT`, `SEMANTIC CASE`, and `DECIDE name FOR state`.
 - `AddChoice` on `Statement` for `CREATE DECISION TREE`.
 
-`MEANS` and `ABOUT` are not keywords. The expression is `atom identifier string-literal`, and the transform accepts only those two words. That keeps `rvbbit.means(...)` working, because the function-name rule still wants an identifier. The left side has to be a column, literal, function call, parenthesized expression, struct, or `CASE`. `lower(body) MEANS 'x'` works. `a || b MEANS 'x'` does not; parenthesize the left side. `SUPPORTS`, `CONTRADICTS`, and `IMPLIES` use the same shape. `ABOVE` applies to `MEANS` and `ABOUT` only.
+`MEANS`, `ABOUT`, and `NEAR` are not keywords. The expression is `atom identifier string-literal`, and the transform accepts `means`, `about`, `near`, `supports`, `contradicts`, and `implies`. That keeps `rvbbit.means(...)` working, because the function-name rule still wants an identifier. The left side has to be a column, literal, function call, parenthesized expression, struct, or `CASE`. `lower(body) MEANS 'x'` works. `a || b MEANS 'x'` does not; parenthesize the left side. `SUPPORTS`, `CONTRADICTS`, and `IMPLIES` use the same shape. `ABOVE` applies to `MEANS`, `ABOUT`, and `NEAR`.
 
-`ABOVE` is a keyword, so it can follow the string. `MEANS ... ABOVE n` becomes `rvbbit.truth(left, right, n)`. `ABOUT ... ABOVE n` becomes `rvbbit.about(left, right) > n`.
+`ABOVE` is a keyword, so it can follow the string. `MEANS ... ABOVE n` becomes `rvbbit.truth(left, right, n)`. `ABOUT ... ABOVE n` becomes `rvbbit.about(left, right) > n`. `NEAR ... ABOVE n` becomes `rvbbit.similarity(left, right) > n`.
 
 The API did not give a way to insert a new precedence level into `ComparisonExpression` without replacing that rule and reimplementing every comparison. Reusing `LIKE`'s existing transform was also a poor fit: its generated trampoline only knows the operators it was compiled with, and `LIKE` is not repeatable, so `MEANS` and `ABOVE` could not both be `LIKE`-class operators. A full `WHEN choose(...) = 'billing'` arm inside `SEMANTIC CASE` would need a second expression grammar that overlaps `CASE`. That was left as a function.
 
@@ -241,6 +312,6 @@ Grammar registration does not change parse behavior until the setting names `rvb
 
 ## Cache identity
 
-A decision is cached by MD5 of the exact request body (model, state, questions with the evidence boundary already applied). The threshold is not part of that body, so `truth` and `truth_score` share a row. A tree node is cached by the evidence it actually sent plus its question and the prior judgments, not by the whole tree. Failed calls are not cached. Chat operators use the same rule with the chat request body.
+A decision is cached by MD5 of the exact request body (model, state, questions with the evidence boundary already applied). The threshold is not part of that body, so `truth` and `truth_score` share a row. A tree node is cached by the evidence it actually sent plus its question and the prior judgments, not by the whole tree. Failed calls are not cached. Chat operators use the same rule with the chat request body. An embedding is cached by MD5 of `embed`, the model, the dimension, and the text after the mode prefix. A query embedding and a document embedding of the same sentence do not share a row.
 
 Calliope hashes judgment keys with blake3. The fields that go into the key match. The digest here is MD5 because it is already in DuckDB and the cache is local to this extension.

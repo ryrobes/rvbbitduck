@@ -18,6 +18,7 @@ namespace duckdb {
 namespace rvbbit {
 
 void RegisterDecisionFunctions(ExtensionLoader &loader);
+void RegisterEmbeddingFunctions(ExtensionLoader &loader);
 void RegisterLlmFunctions(ExtensionLoader &loader);
 void RegisterOperatorFunctions(ExtensionLoader &loader);
 void RegisterGrammar(ExtensionLoader &loader);
@@ -52,6 +53,8 @@ unique_ptr<BaseSecret> CreateOpenRouterSecret(ClientContext &, CreateSecretInput
 	secret->TrySetValue("base_url", input);
 	secret->TrySetValue("decision_model", input);
 	secret->TrySetValue("chat_model", input);
+	secret->TrySetValue("embed_model", input);
+	secret->TrySetValue("embed_dim", input);
 	auto key = secret->TryGetValue(Identifier("key"), false);
 	if (key.IsNull()) {
 		auto api_key = secret->TryGetValue(Identifier("api_key"), false);
@@ -80,6 +83,8 @@ void RegisterSecret(ExtensionLoader &loader) {
 	function.named_parameters["base_url"] = LogicalType::VARCHAR;
 	function.named_parameters["decision_model"] = LogicalType::VARCHAR;
 	function.named_parameters["chat_model"] = LogicalType::VARCHAR;
+	function.named_parameters["embed_model"] = LogicalType::VARCHAR;
+	function.named_parameters["embed_dim"] = LogicalType::INTEGER;
 	loader.RegisterFunction(function);
 }
 
@@ -290,6 +295,12 @@ void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption(Identifier("rvbbit_chat_model"),
 	                          "Overrides the chat model. Empty uses the secret or openai/gpt-6-luna.",
 	                          LogicalType::VARCHAR, Value(""));
+	config.AddExtensionOption(Identifier("rvbbit_embed_model"),
+	                          "Overrides the embeddings model. Empty uses the secret or voyageai/voyage-4.",
+	                          LogicalType::VARCHAR, Value(""));
+	config.AddExtensionOption(Identifier("rvbbit_embed_dim"),
+	                          "Embedding length. 0 uses the secret or 1024 (voyage-4). Must match the model.",
+	                          LogicalType::INTEGER, Value::INTEGER(0));
 	config.AddExtensionOption(Identifier("rvbbit_cache_size"), "In-memory LRU capacity.", LogicalType::INTEGER,
 	                          Value::INTEGER(10000));
 	config.AddExtensionOption(Identifier("rvbbit_max_retries"), "Extra attempts after a 429 or 5xx response.",
@@ -303,6 +314,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	rvbbit::RegisterSecret(loader);
 	rvbbit::RegisterSupport(loader);
 	rvbbit::RegisterDecisionFunctions(loader);
+	rvbbit::RegisterEmbeddingFunctions(loader);
 	rvbbit::RegisterLlmFunctions(loader);
 	rvbbit::RegisterOperatorFunctions(loader);
 	rvbbit::RegisterGrammar(loader);

@@ -1,0 +1,57 @@
+# name: test/sql/vision.test
+# description: image parts, Jev 1.14 boxes, and score ranking
+# group: [sql]
+
+require rvbbit
+
+statement ok
+SET rvbbit_transport='mock';
+
+statement ok
+SET rvbbit_ignore_env=true;
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT rvbbit.image_part('data:image/png;base64,aaaa') LIKE '%image_url%';
+----
+true
+
+statement error
+SELECT rvbbit.image_part('https://example.com/photo.png');
+----
+Invalid Input Error
+
+query I
+SELECT rvbbit.image_part(from_hex('89504E470D0A1A0A')) LIKE '%image/png%';
+----
+true
+
+query I
+SELECT position('Treat state' IN rvbbit.box_question('the logo'));
+----
+0
+
+query I
+SELECT (rvbbit.locate('["please cancel", ' || rvbbit.image_part('data:image/png;base64,aaaa') || ']', 'cancel button')).top;
+----
+0.2
+
+query I
+SELECT count(*) FROM rvbbit.http_log() WHERE kind = 'decision' AND position('Treat state' IN body) = 0;
+----
+1
+
+query I
+SELECT rvbbit.truth_rank('this is a billing problem', 'which queue should take it', ['billing', 'shipping', 'other']);
+----
+billing
+
+query I
+SELECT count(*) FROM rvbbit.http_log() WHERE kind = 'decision' AND position('Treat state' IN body) > 0;
+----
+1

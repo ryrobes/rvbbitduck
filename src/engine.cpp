@@ -15,6 +15,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cctype>
+#include <cmath>
 #include <iterator>
 #include <mutex>
 #include <thread>
@@ -213,6 +214,9 @@ string Endpoint(const ProviderConfig &provider, const string &kind) {
 	if (kind == "chat") {
 		return provider.base_url + "/api/v1/chat/completions";
 	}
+	if (kind == "embed") {
+		return provider.base_url + "/api/v1/embeddings";
+	}
 	return provider.base_url + "/api/alpha/decisions";
 }
 
@@ -390,6 +394,41 @@ Json MockDecision(const Json &request) {
 			answer.Set("type", Json::String("choice"));
 			answer.Set("choice", Json::String(criteria->obj[best].first));
 			answer.Set("probabilities", std::move(probs));
+			answers.Set(entry.first, std::move(answer));
+		} else if (type->str == "score") {
+			auto criteria = question.Find("criteria");
+			if (!criteria || !criteria->IsObject() || criteria->obj.size() < 2) {
+				throw std::runtime_error("mock score question needs levels");
+			}
+			idx_t best = criteria->obj.size() / 2;
+			bool any = false;
+			for (idx_t i = 0; i < criteria->obj.size(); i++) {
+				if (Overlaps(state_text, criteria->obj[i].first) ||
+				    (criteria->obj[i].second.IsString() && Overlaps(state_text, criteria->obj[i].second.str))) {
+					best = i;
+					any = true;
+					break;
+				}
+			}
+			Json answer = Json::Object();
+			answer.Set("type", Json::String("score"));
+			answer.Set("score", Json::String(criteria->obj[best].first));
+			if (!any) {
+				answer.Set("confidence", Json::Number(0.4));
+			}
+			answers.Set(entry.first, std::move(answer));
+		} else if (type->str == "box") {
+			bool hit = Overlaps(state_text, focus);
+			double top = hit ? 0.2 : 0.55;
+			Json box = Json::Object();
+			box.Set("top", Json::Number(top));
+			box.Set("bottom", Json::Number(std::min(1.0, top + 0.3)));
+			box.Set("left", Json::Number(0.15));
+			box.Set("right", Json::Number(0.7));
+			Json answer = Json::Object();
+			answer.Set("type", Json::String("box"));
+			answer.Set("box", std::move(box));
+			answer.Set("confidence", Json::Number(hit ? 0.82 : 0.31));
 			answers.Set(entry.first, std::move(answer));
 		} else {
 			throw std::runtime_error("mock does not implement question type " + type->str);
@@ -685,6 +724,78 @@ int RetryDelayMs(const FetchResult &result, int32_t base_ms, int attempt) {
 	return std::max(delay, 0);
 }
 
+vector<double> HashVector(const string &text, int dim) {
+	vector<double> values(static_cast<size_t>(dim), 0.0);
+	auto words = Words(text);
+	if (words.empty()) {
+		words.push_back(LowerCopy(text));
+	}
+	for (auto &word : words) {
+		uint32_t hash = 2166136261u;
+		for (unsigned char ch : word) {
+			hash ^= ch;
+			hash *= 16777619u;
+		}
+		for (int i = 0; i < dim; i++) {
+			uint32_t mixed = hash + static_cast<uint32_t>(i) * 374761393u;
+			double sign = (mixed & 1u) ? 1.0 : -1.0;
+			values[static_cast<size_t>(i)] += sign * (0.25 + static_cast<double>(mixed % 1000) / 4000.0);
+		}
+	}
+	double norm = 0;
+	for (auto value : values) {
+		norm += value * value;
+	}
+	norm = std::sqrt(norm);
+	if (norm == 0) {
+		values[0] = 1;
+		return values;
+	}
+	for (auto &value : values) {
+		value /= norm;
+	}
+	return values;
+}
+
+Json MockEmbeddings(const Json &request) {
+	auto input = request.Find("input");
+	if (!input || !input->IsArray() || input->arr.empty()) {
+		throw std::runtime_error("embeddings input must be a non-empty array");
+	}
+	int dim = 1024;
+	if (auto dimensions = request.Find("dimensions"); dimensions && dimensions->IsNumber()) {
+		dim = static_cast<int>(dimensions->num);
+	}
+	if (dim < 2) {
+		dim = 2;
+	}
+	if (dim > 4096) {
+		dim = 4096;
+	}
+	Json data = Json::Array();
+	for (idx_t i = 0; i < input->arr.size(); i++) {
+		if (!input->arr[i].IsString()) {
+			throw std::runtime_error("embeddings input must be strings");
+		}
+		auto values = HashVector(input->arr[i].str, dim);
+		Json embedding = Json::Array();
+		for (auto value : values) {
+			embedding.arr.push_back(Json::Number(value));
+		}
+		Json item = Json::Object();
+		item.Set("object", Json::String("embedding"));
+		item.Set("index", Json::Number(static_cast<double>(i)));
+		item.Set("embedding", std::move(embedding));
+		data.arr.push_back(std::move(item));
+	}
+	Json response = Json::Object();
+	response.Set("object", Json::String("list"));
+	auto model = request.Find("model");
+	response.Set("model", model && model->IsString() ? Json::String(model->str) : Json::String("mock"));
+	response.Set("data", std::move(data));
+	return response;
+}
+
 FetchResult MockPost(Engine &engine, const string &kind, const string &body) {
 	int status = 200;
 	{
@@ -699,7 +810,13 @@ FetchResult MockPost(Engine &engine, const string &kind, const string &body) {
 	if (status == 200) {
 		try {
 			auto request = Json::Parse(body);
-			result.body = (kind == "chat" ? MockChat(request) : MockDecision(request)).Dump();
+			if (kind == "chat") {
+				result.body = MockChat(request).Dump();
+			} else if (kind == "embed") {
+				result.body = MockEmbeddings(request).Dump();
+			} else {
+				result.body = MockDecision(request).Dump();
+			}
 			result.ok = true;
 		} catch (const std::exception &ex) {
 			result.status = 500;
@@ -766,6 +883,8 @@ RuntimeSettings LoadSettings(ClientContext &context) {
 	settings.base_url = SettingString(context, "rvbbit_base_url", "");
 	settings.decision_model = SettingString(context, "rvbbit_decision_model", "");
 	settings.chat_model = SettingString(context, "rvbbit_chat_model", "");
+	settings.embed_model = SettingString(context, "rvbbit_embed_model", "");
+	settings.embed_dim = SettingInt(context, "rvbbit_embed_dim", 0);
 	settings.cache_size = SettingInt(context, "rvbbit_cache_size", 10000);
 	settings.max_retries = SettingInt(context, "rvbbit_max_retries", 3);
 	settings.retry_base_ms = SettingInt(context, "rvbbit_retry_base_ms", 200);
@@ -779,6 +898,12 @@ RuntimeSettings LoadSettings(ClientContext &context) {
 	if (settings.cache_size < 0) {
 		settings.cache_size = 0;
 	}
+	if (settings.embed_dim < 0) {
+		settings.embed_dim = 0;
+	}
+	if (settings.embed_dim > 4096) {
+		settings.embed_dim = 4096;
+	}
 	return settings;
 }
 
@@ -787,6 +912,8 @@ ProviderConfig ResolveProvider(ClientContext &context, const RuntimeSettings &se
 	config.base_url = DEFAULT_BASE_URL;
 	config.decision_model = DEFAULT_DECISION_MODEL;
 	config.chat_model = DEFAULT_CHAT_MODEL;
+	config.embed_model = DEFAULT_EMBED_MODEL;
+	config.embed_dim = DEFAULT_EMBED_DIM;
 	config.key_source = "none";
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
 	auto match = SecretManager::Get(context).LookupSecret(transaction, "openrouter", "openrouter");
@@ -812,6 +939,14 @@ ProviderConfig ResolveProvider(ClientContext &context, const RuntimeSettings &se
 		if (!chat.IsNull() && !TrimCopy(chat.ToString()).empty()) {
 			config.chat_model = TrimCopy(chat.ToString());
 		}
+		auto embed = secret.TryGetValue(Identifier("embed_model"), false);
+		if (!embed.IsNull() && !TrimCopy(embed.ToString()).empty()) {
+			config.embed_model = TrimCopy(embed.ToString());
+		}
+		auto embed_dim = secret.TryGetValue(Identifier("embed_dim"), false);
+		if (!embed_dim.IsNull()) {
+			config.embed_dim = embed_dim.GetValue<int32_t>();
+		}
 	}
 	if (config.api_key.empty() && !settings.ignore_env) {
 		auto env = std::getenv("OPENROUTER_API_KEY");
@@ -828,6 +963,15 @@ ProviderConfig ResolveProvider(ClientContext &context, const RuntimeSettings &se
 	}
 	if (!settings.chat_model.empty()) {
 		config.chat_model = settings.chat_model;
+	}
+	if (!settings.embed_model.empty()) {
+		config.embed_model = settings.embed_model;
+	}
+	if (settings.embed_dim >= 2) {
+		config.embed_dim = settings.embed_dim;
+	}
+	if (config.embed_dim < 2 || config.embed_dim > 4096) {
+		config.embed_dim = DEFAULT_EMBED_DIM;
 	}
 	return config;
 }

@@ -171,14 +171,14 @@ arena_ptr<TransformResultValue> FinalizeMeans(PEGTransformer &transformer, Parse
 	if (word == "means") {
 		return transformer.MakeResult<unique_ptr<ParsedExpression>>(Call("means", std::move(args)));
 	}
-	if (word == "about") {
-		auto about = Call("about", std::move(args));
+	if (word == "about" || word == "near") {
+		auto scored = Call(word == "near" ? "similarity" : "about", std::move(args));
 		if (!above.HasResult()) {
-			return transformer.MakeResult<unique_ptr<ParsedExpression>>(std::move(about));
+			return transformer.MakeResult<unique_ptr<ParsedExpression>>(std::move(scored));
 		}
 		auto threshold = ThresholdFrom(transformer, above);
 		return transformer.MakeResult<unique_ptr<ParsedExpression>>(make_uniq<ComparisonExpression>(
-		    ExpressionType::COMPARE_GREATERTHAN, std::move(about), std::move(threshold)));
+		    ExpressionType::COMPARE_GREATERTHAN, std::move(scored), std::move(threshold)));
 	}
 	if (word == "contradicts" || word == "supports" || word == "implies") {
 		if (above.HasResult()) {
@@ -186,7 +186,7 @@ arena_ptr<TransformResultValue> FinalizeMeans(PEGTransformer &transformer, Parse
 		}
 		return transformer.MakeResult<unique_ptr<ParsedExpression>>(Call(word, std::move(args)));
 	}
-	throw ParserException("expected MEANS, ABOUT, CONTRADICTS, SUPPORTS, or IMPLIES, got '%s'", word);
+	throw ParserException("expected MEANS, ABOUT, NEAR, CONTRADICTS, SUPPORTS, or IMPLIES, got '%s'", word);
 }
 
 arena_ptr<TransformResultValue> FinalizeSemanticCase(PEGTransformer &transformer, ParseResult &parse_result) {

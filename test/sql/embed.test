@@ -1,0 +1,141 @@
+# name: test/sql/embed.test
+# description: mocked embeddings, batching, cache, and composites
+# group: [sql]
+
+require rvbbit
+
+statement ok
+SET rvbbit_transport='mock';
+
+statement ok
+SET rvbbit_ignore_env=true;
+
+statement ok
+SET rvbbit_embed_dim=32;
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT len(rvbbit.embed('please cancel'));
+----
+32
+
+query I
+SELECT count(*) FROM rvbbit.http_log() WHERE kind = 'embed';
+----
+1
+
+query I
+SELECT len(rvbbit.embed('please cancel'));
+----
+32
+
+query I
+SELECT count(*) FROM rvbbit.http_log() WHERE kind = 'embed';
+----
+1
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT sum(len(rvbbit.embed(text))) FROM (VALUES ('alpha text here'), ('alpha text here'), ('beta text here')) v(text);
+----
+96
+
+query I
+SELECT count(*) FROM rvbbit.http_log() WHERE kind = 'embed';
+----
+1
+
+query I
+SELECT rvbbit.similarity('please cancel the order', 'please cancel the order') > 0.99;
+----
+true
+
+query I
+SELECT rvbbit.similarity('please cancel the order', 'cancel my subscription please')
+     > rvbbit.similarity('please cancel the order', 'thanks for the wonderful help');
+----
+true
+
+query I
+SELECT rvbbit.nearest_label('please cancel the order', ['cancel the subscription', 'thanks for the help'], ['billing', 'praise'], 'other');
+----
+billing
+
+query I
+SELECT value FROM rvbbit.knn_text('please cancel the order', ['cancel my subscription', 'thanks for the help'], 1);
+----
+cancel my subscription
+
+query I
+SELECT size FROM rvbbit.dedupe_groups(['please cancel', 'please cancel', 'thanks so much'], 0.99) ORDER BY size DESC;
+----
+2
+1
+
+query I
+SELECT text FROM rvbbit.diff(['please cancel the order', 'thanks for the help'], ['please cancel the order'], 1);
+----
+thanks for the help
+
+query I
+SELECT count(*) FROM rvbbit.topics(['please cancel the order', 'cancel my subscription', 'thanks for the help', 'love this product'], 2);
+----
+2
+
+statement ok
+SET rvbbit_embed_model='nomic-ai/nomic-embed-text-v1.5';
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT len(rvbbit.embed('hello there', 'query'));
+----
+32
+
+query I
+SELECT len(rvbbit.embed('hello there', 'document'));
+----
+32
+
+query I
+SELECT count(*) FROM rvbbit.http_log() WHERE kind = 'embed';
+----
+2
+
+statement ok
+SET active_grammar_extensions = ['rvbbit'];
+
+query I
+SELECT ('please cancel the order' NEAR 'cancel my subscription') > ('please cancel the order' NEAR 'thanks for the wonderful help');
+----
+true
+
+statement ok
+SET rvbbit_embed_model='';
+
+statement ok
+CREATE TABLE rvbbit_docs AS
+SELECT text, rvbbit.embed(text)::FLOAT[32] AS embedding
+FROM (VALUES ('please cancel the order'), ('thanks for the wonderful help')) v(text);
+
+query I
+SELECT d.text
+FROM (SELECT rvbbit.embed('cancel my subscription')::FLOAT[32] AS embedding) q
+JOIN rvbbit_docs d
+NEAREST 1 BY SIMILARITY array_cosine_similarity(q.embedding, d.embedding);
+----
+please cancel the order

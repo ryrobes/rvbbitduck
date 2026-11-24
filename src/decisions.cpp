@@ -102,12 +102,12 @@ void PrefixQuestions(Json &questions) {
 			throw InvalidInputException("instructions must contain 1 to 2000 characters");
 		}
 		entry.second.Set("instructions", Json::String(WithBoundary(text, type->str)));
-		if (type->str == "choice") {
+		if (type->str == "choice" || type->str == "score") {
 			auto criteria = entry.second.Find("criteria");
 			if (!criteria || !criteria->IsObject() || criteria->obj.size() < 2 || criteria->obj.size() > 16) {
-				throw InvalidInputException("choice questions need 2 to 16 criteria");
+				throw InvalidInputException(type->str + " questions need 2 to 16 criteria");
 			}
-		} else if (type->str != "noul" && type->str != "box" && type->str != "score") {
+		} else if (type->str != "noul" && type->str != "box") {
 			throw InvalidInputException("unsupported question type " + type->str);
 		}
 	}
@@ -272,12 +272,41 @@ string NormalizeDecision(const string &request_body, const string &response_body
 				kept.Set("confidence", Json::Number(confidence->num));
 			}
 		} else if (qtype->str == "score") {
+			auto criteria = entry.second.Find("criteria");
 			auto score = answer->Find("score");
-			if (!score || !score->IsString()) {
+			if (!criteria || !score || !score->IsString() || !criteria->Has(score->str)) {
 				error = "invalid score answer";
 				return "";
 			}
 			kept.Set("score", Json::String(score->str));
+		} else if (qtype->str == "box") {
+			auto box = answer->Find("box");
+			if (!box || !box->IsObject()) {
+				error = "invalid box";
+				return "";
+			}
+			double edges[4];
+			const char *names[] = {"top", "bottom", "left", "right"};
+			for (int i = 0; i < 4; i++) {
+				auto edge = box->Find(names[i]);
+				if (!FiniteProbability(edge)) {
+					error = "invalid box edge";
+					return "";
+				}
+				edges[i] = edge->num;
+			}
+			if (edges[0] > edges[1] || edges[2] > edges[3]) {
+				error = "invalid box";
+				return "";
+			}
+			Json kept_box = Json::Object();
+			for (int i = 0; i < 4; i++) {
+				kept_box.Set(names[i], Json::Number(edges[i]));
+			}
+			kept.Set("box", std::move(kept_box));
+			if (confidence && !confidence->IsNull()) {
+				kept.Set("confidence", Json::Number(confidence->num));
+			}
 		} else {
 			error = "unsupported question type";
 			return "";
@@ -1387,6 +1416,251 @@ void RunTreeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	}
 }
 
+string Base64(const string &bytes) {
+	static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	string out;
+	out.reserve(((bytes.size() + 2) / 3) * 4);
+	int value = 0;
+	int bits = -6;
+	for (unsigned char ch : bytes) {
+		value = (value << 8) + ch;
+		bits += 8;
+		while (bits >= 0) {
+			out.push_back(alphabet[(value >> bits) & 0x3F]);
+			bits -= 6;
+		}
+	}
+	if (bits > -6) {
+		out.push_back(alphabet[((value << 8) >> (bits + 8)) & 0x3F]);
+	}
+	while (out.size() % 4) {
+		out.push_back('=');
+	}
+	return out;
+}
+
+bool ImageDataUrl(const string &image) {
+	return image.rfind("data:image/png;base64,", 0) == 0 || image.rfind("data:image/jpeg;base64,", 0) == 0;
+}
+
+string ImagePartJson(const string &url) {
+	Json image_url = Json::Object();
+	image_url.Set("url", Json::String(url));
+	Json part = Json::Object();
+	part.Set("type", Json::String("image_url"));
+	part.Set("image_url", std::move(image_url));
+	return part.Dump();
+}
+
+void ImagePartTextFunction(DataChunk &args, ExpressionState &, Vector &result) {
+	for (idx_t row = 0; row < args.size(); row++) {
+		string image;
+		if (!ArgString(args.data[0], row, image)) {
+			SetNull(result, row);
+			continue;
+		}
+		if (!ImageDataUrl(image)) {
+			throw InvalidInputException(
+			    "image must be a base64 PNG or JPEG data URL (data:image/jpeg;base64,...)");
+		}
+		result.SetValue(row, Value(ImagePartJson(image)));
+	}
+}
+
+void ImagePartBlobFunction(DataChunk &args, ExpressionState &, Vector &result) {
+	for (idx_t row = 0; row < args.size(); row++) {
+		auto value = args.data[0].GetValue(row);
+		if (value.IsNull()) {
+			SetNull(result, row);
+			continue;
+		}
+		auto bytes = StringValue::Get(value);
+		string kind;
+		if (bytes.size() >= 8 && static_cast<unsigned char>(bytes[0]) == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' &&
+		    bytes[3] == 'G') {
+			kind = "image/png";
+		} else if (bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0xFF &&
+		           static_cast<unsigned char>(bytes[1]) == 0xD8) {
+			kind = "image/jpeg";
+		} else {
+			throw InvalidInputException("image bytes must be a PNG or JPEG file");
+		}
+		result.SetValue(row, Value(ImagePartJson("data:" + kind + ";base64," + Base64(bytes))));
+	}
+}
+
+void BoxQuestionFunction(DataChunk &args, ExpressionState &, Vector &result) {
+	for (idx_t row = 0; row < args.size(); row++) {
+		string target;
+		if (!ArgString(args.data[0], row, target)) {
+			SetNull(result, row);
+			continue;
+		}
+		target = Trim(target);
+		if (target.empty() || target.size() > 2000) {
+			throw InvalidInputException("target must contain 1 to 2000 characters");
+		}
+		Json question = Json::Object();
+		question.Set("type", Json::String("box"));
+		question.Set("instructions", Json::String(target));
+		Json questions = Json::Object();
+		questions.Set("result", std::move(question));
+		result.SetValue(row, Value(questions.Dump()));
+	}
+}
+
+LogicalType BoxResultType() {
+	child_list_t<LogicalType> children;
+	children.emplace_back(Identifier("top"), LogicalType::DOUBLE);
+	children.emplace_back(Identifier("bottom"), LogicalType::DOUBLE);
+	children.emplace_back(Identifier("left"), LogicalType::DOUBLE);
+	children.emplace_back(Identifier("right"), LogicalType::DOUBLE);
+	children.emplace_back(Identifier("confidence"), LogicalType::DOUBLE);
+	return LogicalType::STRUCT(std::move(children));
+}
+
+void LocateFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &context = state.GetContext();
+	vector<string> bodies(args.size());
+	vector<char> live(args.size(), 0);
+	for (idx_t row = 0; row < args.size(); row++) {
+		string raw_state;
+		string target;
+		if (!ArgString(args.data[0], row, raw_state) || !ArgString(args.data[1], row, target)) {
+			SetNull(result, row);
+			continue;
+		}
+		target = Trim(target);
+		if (target.empty() || target.size() > 2000) {
+			throw InvalidInputException("target must contain 1 to 2000 characters");
+		}
+		string model = DEFAULT_BOX_MODEL;
+		if (args.ColumnCount() > 2) {
+			string override_model;
+			if (ArgString(args.data[2], row, override_model) && !Trim(override_model).empty()) {
+				model = Trim(override_model);
+			}
+		}
+		Json question = Json::Object();
+		question.Set("type", Json::String("box"));
+		question.Set("instructions", Json::String(target));
+		Json questions = Json::Object();
+		questions.Set("result", std::move(question));
+		bodies[row] = DecisionBody(EncodeState(raw_state), std::move(questions), model);
+		live[row] = 1;
+	}
+	vector<string> needed;
+	for (idx_t row = 0; row < args.size(); row++) {
+		if (live[row]) {
+			needed.push_back(bodies[row]);
+		}
+	}
+	auto resolved = needed.empty() ? unordered_map<string, string> {} : ResolveDecisions(context, needed);
+	auto type = BoxResultType();
+	for (idx_t row = 0; row < args.size(); row++) {
+		if (!live[row]) {
+			continue;
+		}
+		auto found = resolved.find(bodies[row]);
+		if (found == resolved.end()) {
+			SetNull(result, row);
+			continue;
+		}
+		auto parsed = Json::Parse(found->second);
+		auto answers = parsed.Find("answers");
+		auto answer = answers ? answers->Find("result") : nullptr;
+		auto box = answer ? answer->Find("box") : nullptr;
+		if (!box) {
+			SetNull(result, row);
+			continue;
+		}
+		vector<Value> values;
+		for (auto name : {"top", "bottom", "left", "right"}) {
+			values.push_back(Value::DOUBLE(box->Find(name)->num));
+		}
+		auto confidence = answer->Find("confidence");
+		values.push_back(confidence && confidence->IsNumber() ? Value::DOUBLE(confidence->num) : Value(LogicalType::DOUBLE));
+		result.SetValue(row, Value::STRUCT(type, std::move(values)));
+	}
+}
+
+void TruthRankFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &context = state.GetContext();
+	auto provider = ResolveProvider(context, LoadSettings(context));
+	vector<string> bodies(args.size());
+	vector<char> live(args.size(), 0);
+	for (idx_t row = 0; row < args.size(); row++) {
+		string raw_state;
+		string question;
+		if (!ArgString(args.data[0], row, raw_state) || !ArgString(args.data[1], row, question) ||
+		    args.data[2].GetValue(row).IsNull()) {
+			SetNull(result, row);
+			continue;
+		}
+		question = Trim(question);
+		if (question.empty() || question.size() > 2000) {
+			throw InvalidInputException("question must contain 1 to 2000 characters");
+		}
+		auto levels_value = args.data[2].GetValue(row);
+		auto levels = ListValue::GetChildren(levels_value);
+		if (levels.size() < 2 || levels.size() > 16) {
+			throw InvalidInputException("truth_rank needs 2 to 16 levels");
+		}
+		Json criteria = Json::Object();
+		for (auto &level : levels) {
+			if (level.IsNull()) {
+				throw InvalidInputException("truth_rank levels must be text");
+			}
+			auto label = Trim(StringValue::Get(level));
+			if (label.empty() || criteria.Has(label)) {
+				throw InvalidInputException("truth_rank levels must be distinct and non-empty");
+			}
+			criteria.Set(label, Json::String(label));
+		}
+		string model = provider.decision_model;
+		if (args.ColumnCount() > 3) {
+			string override_model;
+			if (ArgString(args.data[3], row, override_model) && !Trim(override_model).empty()) {
+				model = Trim(override_model);
+			}
+		}
+		Json spec = Json::Object();
+		spec.Set("type", Json::String("score"));
+		spec.Set("instructions", Json::String(question));
+		spec.Set("criteria", std::move(criteria));
+		Json questions = Json::Object();
+		questions.Set("result", std::move(spec));
+		bodies[row] = DecisionBody(EncodeState(raw_state), std::move(questions), model);
+		live[row] = 1;
+	}
+	vector<string> needed;
+	for (idx_t row = 0; row < args.size(); row++) {
+		if (live[row]) {
+			needed.push_back(bodies[row]);
+		}
+	}
+	auto resolved = needed.empty() ? unordered_map<string, string> {} : ResolveDecisions(context, needed);
+	for (idx_t row = 0; row < args.size(); row++) {
+		if (!live[row]) {
+			continue;
+		}
+		auto found = resolved.find(bodies[row]);
+		if (found == resolved.end()) {
+			SetNull(result, row);
+			continue;
+		}
+		auto parsed = Json::Parse(found->second);
+		auto answers = parsed.Find("answers");
+		auto answer = answers ? answers->Find("result") : nullptr;
+		auto score = answer ? answer->Find("score") : nullptr;
+		if (!score || !score->IsString()) {
+			SetNull(result, row);
+		} else {
+			result.SetValue(row, Value(score->str));
+		}
+	}
+}
+
 ScalarFunction VolatileFun(const string &name, std::initializer_list<FunctionParameter> params, LogicalType ret,
                            scalar_function_t func) {
 	ScalarFunction fun(Identifier(name), params, std::move(ret), func);
@@ -1492,6 +1766,27 @@ void RegisterDecisionFunctions(ExtensionLoader &loader) {
 	    {FunctionParameter("name", LogicalType::VARCHAR), FunctionParameter("state", LogicalType::VARCHAR),
 	     FunctionParameter("max_steps", LogicalType::INTEGER, Value::INTEGER(16))},
 	    tree_type, RunTreeFunction));
+	ScalarFunctionSet image_part("image_part");
+	image_part.AddFunction(
+	    StableFun("image_part", {FunctionParameter("image", LogicalType::VARCHAR)}, LogicalType::VARCHAR,
+	              ImagePartTextFunction));
+	image_part.AddFunction(
+	    StableFun("image_part", {FunctionParameter("image", LogicalType::BLOB)}, LogicalType::VARCHAR,
+	              ImagePartBlobFunction));
+	loader.RegisterFunction(image_part);
+	loader.RegisterFunction(StableFun("box_question", {FunctionParameter("target", LogicalType::VARCHAR)},
+	                                  LogicalType::VARCHAR, BoxQuestionFunction));
+	loader.RegisterFunction(VolatileFun(
+	    "locate",
+	    {FunctionParameter("state", LogicalType::VARCHAR), FunctionParameter("target", LogicalType::VARCHAR),
+	     FunctionParameter("model", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))},
+	    BoxResultType(), LocateFunction));
+	loader.RegisterFunction(VolatileFun(
+	    "truth_rank",
+	    {FunctionParameter("state", LogicalType::VARCHAR), FunctionParameter("question", LogicalType::VARCHAR),
+	     FunctionParameter("levels", varchar_list),
+	     FunctionParameter("model", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))},
+	    LogicalType::VARCHAR, TruthRankFunction));
 }
 
 } // namespace rvbbit

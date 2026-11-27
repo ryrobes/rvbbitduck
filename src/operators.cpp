@@ -691,6 +691,7 @@ void ExecuteOne(ClientContext &context, const Operator &op, const Json &inputs, 
 	string cached;
 	auto key = FinalCacheKey(op, inputs, model);
 	if (CacheGet(context, key, cached)) {
+		RecordCacheHit(context, "chat", model);
 		Work hit;
 		hit.ok = true;
 		hit.output = cached;
@@ -785,6 +786,7 @@ void RunNamed(const string &name, DataChunk &args, ExpressionState &state, Vecto
 		auto key = FinalCacheKey(op, inputs, model);
 		string cached;
 		if (CacheGet(context, key, cached)) {
+			RecordCacheHit(context, "chat", model);
 			Work hit;
 			hit.ok = true;
 			hit.output = cached;
@@ -870,7 +872,6 @@ RVBBIT_OP(TagsOp, "tags")
 RVBBIT_OP(AspectsOp, "aspects")
 RVBBIT_OP(EntitiesOp, "entities")
 RVBBIT_OP(KeyphrasesOp, "keyphrases")
-RVBBIT_OP(ClassifyCollectionOp, "classify_collection")
 
 #undef RVBBIT_OP
 
@@ -1281,7 +1282,34 @@ void Seed() {
 		                   "overall theme. Return ONLY the category name, exactly as provided.";
 		op.user_prompt = "TEXTS:\n{{ text }}\n\nCATEGORIES: {{ categories }}\n\nWhich category best describes this "
 		                 "collection as a whole?";
-		op.description = "AGGREGATE: one label for a collection. Registered, not executed yet.";
+		op.description = "AGGREGATE: one label for a group of texts. Use with GROUP BY.";
+		Add(std::move(op));
+	}
+	{
+		Operator op;
+		op.name = "summarize_collection";
+		op.shape = "aggregate";
+		op.arg_names = {"text"};
+		op.return_type = "text";
+		op.parser = "strip";
+		op.max_tokens = 240;
+		op.system_prompt = "You summarize a collection of texts in ONE short sentence. Output ONLY the sentence.";
+		op.user_prompt = "TEXTS:\n{{ text }}\n\nSummary:";
+		op.description = "AGGREGATE: one sentence for a group of texts. Use with GROUP BY.";
+		Add(std::move(op));
+	}
+	{
+		Operator op;
+		op.name = "consensus";
+		op.shape = "aggregate";
+		op.arg_names = {"text"};
+		op.return_type = "text";
+		op.parser = "strip";
+		op.max_tokens = 160;
+		op.system_prompt = "You state the single consensus of a collection of texts in one short sentence. "
+		                   "Output ONLY that sentence.";
+		op.user_prompt = "TEXTS:\n{{ text }}\n\nCONSENSUS:";
+		op.description = "AGGREGATE: one consensus sentence for a group of texts. Use with GROUP BY.";
 		Add(std::move(op));
 	}
 	auto dimension = [](const char *name, const char *system, const char *user, const char *description) {
@@ -1329,6 +1357,26 @@ void Seed() {
 }
 
 } // namespace
+
+string EvaluateOperator(ClientContext &context, const string &name, const Json &inputs) {
+	auto op = CopyOf(name);
+	auto model = OperatorModel(context, op);
+	auto key = FinalCacheKey(op, inputs, model);
+	string cached;
+	if (CacheGet(context, key, cached)) {
+		RecordCacheHit(context, "chat", model);
+		return cached;
+	}
+	auto user = Render(op.user_prompt, inputs, nullptr, "", 1);
+	auto work = Chat(context, op, model, op.system_prompt, user);
+	if (!work.ok) {
+		throw InvalidInputException(work.error.empty() ? "aggregate operator failed" : work.error);
+	}
+	CachePut(context, key, work.output);
+	return work.output;
+}
+
+void RegisterAggregateOperators(ExtensionLoader &loader);
 
 void RegisterOperatorFunctions(ExtensionLoader &loader) {
 	Seed();
@@ -1379,10 +1427,7 @@ void RegisterOperatorFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(Fun("aspects", {FunctionParameter("text", LogicalType::VARCHAR)}, list, AspectsOp));
 	loader.RegisterFunction(Fun("entities", {FunctionParameter("text", LogicalType::VARCHAR)}, list, EntitiesOp));
 	loader.RegisterFunction(Fun("keyphrases", {FunctionParameter("text", LogicalType::VARCHAR)}, list, KeyphrasesOp));
-	loader.RegisterFunction(Fun(
-	    "classify_collection",
-	    {FunctionParameter("text", LogicalType::VARCHAR), FunctionParameter("categories", LogicalType::VARCHAR)},
-	    LogicalType::VARCHAR, ClassifyCollectionOp));
+	RegisterAggregateOperators(loader);
 
 	ScalarFunctionSet exec_set("exec");
 	exec_set.AddFunction(Fun(

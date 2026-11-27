@@ -1,0 +1,90 @@
+# name: test/sql/aggregates.test
+# description: grouped semantic aggregates
+# group: [sql]
+
+require rvbbit
+
+statement ok
+SET rvbbit_transport='mock';
+
+statement ok
+SET rvbbit_ignore_env=true;
+
+statement ok
+SET rvbbit_retry_base_ms=1;
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+statement ok
+SELECT rvbbit.ledger_reset();
+
+query II
+SELECT region, rvbbit.classify_collection(body, 'billing,shipping,other') AS label
+FROM (VALUES
+    ('east', 'please refund this billing charge'),
+    ('east', 'another billing invoice problem'),
+    ('east', 'please refund this billing charge'),
+    ('west', 'where is the shipping package')) v(region, body)
+GROUP BY region
+ORDER BY region;
+----
+east	billing
+west	shipping
+
+# Duplicates in a group share one chat call. Two groups, two calls.
+query I
+SELECT count(*) FROM rvbbit.http_log() WHERE kind = 'chat';
+----
+2
+
+query I
+SELECT rvbbit.summarize_collection(body) FROM (VALUES ('revenue grew in asia')) t(body);
+----
+Summary of: - revenue grew in asia
+
+query I
+SELECT rvbbit.consensus(body) FROM (VALUES ('please cancel the billing charge'), ('please cancel the billing charge')) t(body);
+----
+consensus: - please cancel the billing charge
+
+query I
+SELECT contains(array_to_string(rvbbit.collection_themes(body), ','), 'Cancellation')
+FROM (VALUES ('please cancel the billing problem'), ('please cancel the billing problem')) t(body);
+----
+true
+
+# NULL inputs do not call the model.
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT rvbbit.classify_collection(body, 'billing,other') IS NULL FROM (VALUES (NULL)) t(body);
+----
+true
+
+query I
+SELECT count(*) FROM rvbbit.http_log();
+----
+0
+
+# More than one chunk is reduced. Thirteen distinct texts, chunk size 12.
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT rvbbit.classify_collection(body, 'billing,other')
+FROM (
+    SELECT 'billing note ' || i AS body
+    FROM range(13) t(i)
+);
+----
+billing
+
+query I
+SELECT count(*) >= 2 FROM rvbbit.http_log() WHERE kind = 'chat';
+----
+true

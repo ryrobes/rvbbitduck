@@ -83,6 +83,7 @@ struct Slot {
 	string request_body;
 	string url;
 	char errbuf[CURL_ERROR_SIZE] {};
+	std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
 	int attempt = 1;
 	idx_t index = 0;
 };
@@ -177,7 +178,8 @@ FetchResult FinishSlot(Slot &slot, CURLcode code) {
 
 } // namespace
 
-void RecordHttp(const string &kind, const string &url, int status, const string &body);
+void RecordExchange(ClientContext &context, const string &kind, const string &url, int status,
+                    const string &request_body, const string &response_body, int64_t latency_ms);
 
 vector<FetchResult> LivePostMany(ClientContext &context, const string &kind, const string &url,
                                  const vector<string> &bodies, const string &api_key, const LivePostOptions &options) {
@@ -266,6 +268,7 @@ vector<FetchResult> LivePostMany(ClientContext &context, const string &kind, con
 			curl_easy_setopt(slot->easy, CURLOPT_SSL_VERIFYHOST, options.tls_verify ? 2L : 0L);
 			curl_easy_setopt(slot->easy, CURLOPT_FOLLOWLOCATION, 0L);
 			curl_easy_setopt(slot->easy, CURLOPT_USERAGENT, "rvbbitduck");
+			slot->started = std::chrono::steady_clock::now();
 			curl_multi_add_handle(multi, slot->easy);
 			slots.push_back(std::move(slot));
 			inflight++;
@@ -307,7 +310,11 @@ vector<FetchResult> LivePostMany(ClientContext &context, const string &kind, con
 					continue;
 				}
 				auto result = FinishSlot(*slot, message->data.result);
-				RecordHttp(kind, slot->url, result.status, slot->request_body);
+				auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+				                   std::chrono::steady_clock::now() - slot->started)
+				                   .count();
+				RecordExchange(context, kind, slot->url, result.status, slot->request_body, slot->response,
+				               static_cast<int64_t>(elapsed));
 				inflight--;
 				bool again = !result.ok && RetryableStatus(result.status) && slot->attempt < max_attempts;
 				if (again) {

@@ -22,6 +22,7 @@ set(EXTENSION_SOURCES
     src/decisions.cpp
     src/llm.cpp
     src/operators.cpp
+    src/aggregates.cpp
     src/embeddings.cpp
     src/grammar.cpp
     src/rvbbit_extension.cpp)

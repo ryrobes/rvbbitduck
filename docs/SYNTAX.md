@@ -189,6 +189,40 @@ SELECT rvbbit.exec('ping', 'hello');
 
 `{{ arg }}`, `{{ inputs.arg }}`, and `{{ steps.name.output }}` are the template fields. `safe_classify` is the seeded two-step operator: an LLM call, then the `validate_one_of` code step.
 
+## Grouped aggregates
+
+Calliope 1.2.3 declares `classify_collection` as an aggregate and does not execute it. Here it is a real aggregate, along with three collection forms that use the same chat path. They sit in `GROUP BY` like any other aggregate. Per-row `themes(text)`, `tags(text)`, and the other dimension lists stay one value per row.
+
+```sql
+SELECT region,
+       rvbbit.classify_collection(body, 'billing,shipping,other') AS desk,
+       rvbbit.summarize_collection(body) AS summary,
+       rvbbit.consensus(body) AS agreed,
+       rvbbit.collection_themes(body) AS themes
+FROM tickets
+GROUP BY region;
+```
+
+A group keeps at most 48 distinct texts. Each text is cut at 400 characters. Duplicate texts in the group are one input. When a group has more than 12 texts, each chunk of 12 is judged first and those answers are judged again. The category list passed to `classify_collection` should be constant inside the group; the first non-null value is the one that is sent.
+
+`SELECT rvbbit.classify_collection(body, 'billing,other') FROM tickets` with no `GROUP BY` is one collection: the whole table.
+
+## Usage ledger
+
+Every OpenRouter POST and every cache hit is a row. The API key is not stored. A cache hit has `cost` 0, `cache_hit` true, and `endpoint` `cache`. Token counts and `cost` come from the provider `usage` object when it is present (`prompt_tokens` or `input_tokens`, `completion_tokens` or `output_tokens`, `cost`).
+
+```sql
+SELECT kind, model, prompt_tokens, completion_tokens, cost, cache_hit, status
+FROM rvbbit.ledger();
+
+SELECT http_requests, cache_hits, prompt_tokens, completion_tokens, cost
+FROM rvbbit.spend();
+
+SELECT rvbbit.ledger_reset();
+```
+
+Rows stay in memory for the process (the newest 10000). If `rvbbit_cache_path` is set, they are also appended to a `ledger` table in that DuckDB file and reloaded the next time the ledger is read.
+
 ## Embeddings
 
 `rvbbit.embed(text)` returns `FLOAT[]`. The length is `rvbbit_embed_dim` when that setting is at least 2, otherwise the secret's `EMBED_DIM`, otherwise 1024. The default model is `mongodb/voyage-4`. `voyageai/voyage-4` is accepted and rewritten to that id before the request and the cache key. The request is OpenAI-shaped:

@@ -129,6 +129,7 @@ unordered_map<string, string> ResolveChats(ClientContext &context, const vector<
 		}
 		string cached;
 		if (CacheGet(context, Md5Hex(string("chat\n") + body), cached)) {
+			RecordCacheHit(context, "chat", RequestModel(body));
 			resolved[body] = std::move(cached);
 		} else {
 			missing.push_back(body);

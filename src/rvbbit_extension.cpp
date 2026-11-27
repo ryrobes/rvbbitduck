@@ -234,6 +234,90 @@ void StatsScan(ClientContext &, TableFunctionInput &input, DataChunk &output) {
 	state.done = true;
 }
 
+struct LedgerState : public GlobalTableFunctionState {
+	vector<LedgerRow> rows;
+	idx_t offset = 0;
+};
+
+unique_ptr<FunctionData> LedgerBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
+                                    vector<Identifier> &names) {
+	names = {Identifier("seq"),           Identifier("kind"),        Identifier("model"),
+	         Identifier("endpoint"),      Identifier("prompt_tokens"), Identifier("completion_tokens"),
+	         Identifier("cost"),          Identifier("cache_hit"),   Identifier("latency_ms"),
+	         Identifier("status")};
+	return_types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::DOUBLE, LogicalType::BOOLEAN,
+	                LogicalType::BIGINT, LogicalType::INTEGER};
+	return make_uniq<TableFunctionData>();
+}
+
+unique_ptr<GlobalTableFunctionState> LedgerInit(ClientContext &context, TableFunctionInitInput &) {
+	auto state = make_uniq<LedgerState>();
+	state->rows = LedgerSnapshot(context);
+	return std::move(state);
+}
+
+void LedgerScan(ClientContext &, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<LedgerState>();
+	idx_t count = 0;
+	while (state.offset < state.rows.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &row = state.rows[state.offset++];
+		output.data[0].SetValue(count, Value::BIGINT(row.seq));
+		output.data[1].SetValue(count, Value(row.kind));
+		output.data[2].SetValue(count, Value(row.model));
+		output.data[3].SetValue(count, Value(row.endpoint));
+		output.data[4].SetValue(count, Value::BIGINT(row.prompt_tokens));
+		output.data[5].SetValue(count, Value::BIGINT(row.completion_tokens));
+		output.data[6].SetValue(count, Value::DOUBLE(row.cost));
+		output.data[7].SetValue(count, Value::BOOLEAN(row.cache_hit));
+		output.data[8].SetValue(count, Value::BIGINT(row.latency_ms));
+		output.data[9].SetValue(count, Value::INTEGER(row.status));
+		count++;
+	}
+	output.SetCardinalityUnsafe(count);
+}
+
+struct SpendState : public GlobalTableFunctionState {
+	bool done = false;
+	SpendSummary summary;
+};
+
+unique_ptr<FunctionData> SpendBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
+                                   vector<Identifier> &names) {
+	names = {Identifier("requests"),     Identifier("http_requests"), Identifier("cache_hits"),
+	         Identifier("prompt_tokens"), Identifier("completion_tokens"), Identifier("cost")};
+	return_types = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT,
+	                LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::DOUBLE};
+	return make_uniq<TableFunctionData>();
+}
+
+unique_ptr<GlobalTableFunctionState> SpendInit(ClientContext &context, TableFunctionInitInput &) {
+	auto state = make_uniq<SpendState>();
+	state->summary = SpendSnapshot(context);
+	return std::move(state);
+}
+
+void SpendScan(ClientContext &, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<SpendState>();
+	if (state.done) {
+		output.SetCardinalityUnsafe(0);
+		return;
+	}
+	state.done = true;
+	output.data[0].SetValue(0, Value::BIGINT(state.summary.requests));
+	output.data[1].SetValue(0, Value::BIGINT(state.summary.http_requests));
+	output.data[2].SetValue(0, Value::BIGINT(state.summary.cache_hits));
+	output.data[3].SetValue(0, Value::BIGINT(state.summary.prompt_tokens));
+	output.data[4].SetValue(0, Value::BIGINT(state.summary.completion_tokens));
+	output.data[5].SetValue(0, Value::DOUBLE(state.summary.cost));
+	output.SetCardinalityUnsafe(1);
+}
+
+void LedgerResetFunction(DataChunk &, ExpressionState &state, Vector &result) {
+	LedgerReset(state.GetContext());
+	result.SetValue(0, Value::BOOLEAN(true));
+}
+
 void RegisterSupport(ExtensionLoader &loader) {
 	loader.RegisterFunction(VolatileFun("version", {}, LogicalType::VARCHAR, VersionFunction));
 	loader.RegisterFunction(VolatileFun("key_source", {}, LogicalType::VARCHAR, KeySourceFunction));
@@ -268,6 +352,11 @@ void RegisterSupport(ExtensionLoader &loader) {
 	loader.RegisterFunction(http_log);
 	TableFunction cache_stats(Identifier("cache_stats"), {}, StatsScan, StatsBind, StatsInit);
 	loader.RegisterFunction(cache_stats);
+	TableFunction ledger(Identifier("ledger"), {}, LedgerScan, LedgerBind, LedgerInit);
+	loader.RegisterFunction(ledger);
+	TableFunction spend(Identifier("spend"), {}, SpendScan, SpendBind, SpendInit);
+	loader.RegisterFunction(spend);
+	loader.RegisterFunction(VolatileFun("ledger_reset", {}, LogicalType::BOOLEAN, LedgerResetFunction));
 }
 
 } // namespace rvbbit
@@ -283,7 +372,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	                          "Process-wide cap on in-flight OpenRouter HTTP requests.", LogicalType::INTEGER,
 	                          Value::INTEGER(8));
 	config.AddExtensionOption(Identifier("rvbbit_cache_path"),
-	                          "Optional DuckDB file used as the persistent judgment and named-tree cache.",
+	                          "Optional DuckDB file for the judgment cache, named trees, and the usage ledger.",
 	                          LogicalType::VARCHAR, Value(""));
 	config.AddExtensionOption(Identifier("rvbbit_base_url"),
 	                          "OpenRouter origin, or another gateway that speaks the same paths. Empty uses the secret "

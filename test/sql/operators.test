@@ -104,11 +104,6 @@ SELECT contains(array_to_string(rvbbit.themes('please cancel the billing problem
 ----
 true
 
-statement error
-SELECT rvbbit.classify_collection('please cancel', 'billing,other');
-----
-not executed
-
 query I
 SELECT rvbbit.create_operator(
     'ping',

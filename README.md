@@ -36,7 +36,8 @@ The extension you `LOAD` is named `rvbbit`. Functions live in the `rvbbit` schem
 - `image_part` checks the data-URL prefix or the PNG/JPEG signature. Pixel bounds (each side 256–1568) are enforced by Jev, not here. Remote URLs are rejected.
 - `truth_rank` follows the live Jev score shape: `criteria` is an array, and the answer is a numeric index plus a `legend`. Calliope 1.2.3 has no score-question SQL. The label returned is `legend[argmax(probabilities)]`, or the rounded index when probabilities are absent.
 - A WASM HTTP transport is only a hook. `__EMSCRIPTEN__` builds raise a clear error instead of linking libcurl.
-- No receipt or cost ledger, and no `prewarm`. Cache keys are MD5, not blake3. `tree_id` is MD5 of canonical compact JSON, not Postgres `md5(tree::jsonb::text)`.
+- `classify_collection`, `summarize_collection`, `consensus`, and `collection_themes` are real `GROUP BY` aggregates. A group keeps at most 48 distinct texts (each truncated to 400 characters). Groups larger than 12 texts are reduced in chunks of 12, then reduced again. Per-row `themes(text)` still returns that one text's list.
+- `rvbbit.ledger()` records each OpenRouter call and each cache hit (model, endpoint, token counts, cost, latency, status). `rvbbit.spend()` totals them. Cache hits cost 0. The API key is not stored. When `rvbbit_cache_path` is set, the same rows are appended to a `ledger` table in that file.
 
 ## Install and build
 

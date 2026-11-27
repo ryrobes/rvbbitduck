@@ -398,6 +398,7 @@ unordered_map<string, string> ResolveDecisions(ClientContext &context, const vec
 		}
 		string cached;
 		if (CacheGet(context, DecisionCacheKey(body), cached)) {
+			RecordCacheHit(context, "decision", RequestModel(body));
 			resolved[body] = std::move(cached);
 		} else {
 			missing.push_back(body);

@@ -119,6 +119,10 @@ public:
 
 	vector<LogEntry> log;
 	int64_t log_seq = 0;
+	vector<LedgerRow> ledger;
+	int64_t ledger_seq = 0;
+	bool ledger_loaded = false;
+	string ledger_loaded_path;
 
 	int32_t fail_remaining = 0;
 	int32_t fail_status = 500;
@@ -180,6 +184,8 @@ public:
 		}
 	}
 
+	void RememberLedger(ClientContext &context, LedgerRow row);
+
 	bool LookupL1(const string &key, string &payload) {
 		for (idx_t i = 0; i < lru.size(); i++) {
 			if (lru[i].key == key) {
@@ -233,9 +239,75 @@ void EnsureCache(Engine &engine, const string &path) {
 	engine.cache_con = make_uniq<Connection>(*engine.cache_db);
 	auto created = engine.cache_con->Query(
 	    "CREATE TABLE IF NOT EXISTS judgments(cache_key VARCHAR PRIMARY KEY, payload VARCHAR NOT NULL);"
-	    "CREATE TABLE IF NOT EXISTS trees(name VARCHAR PRIMARY KEY, tree_json VARCHAR NOT NULL);");
+	    "CREATE TABLE IF NOT EXISTS trees(name VARCHAR PRIMARY KEY, tree_json VARCHAR NOT NULL);"
+	    "CREATE TABLE IF NOT EXISTS ledger(seq BIGINT, kind VARCHAR, model VARCHAR, endpoint VARCHAR, "
+	    "prompt_tokens BIGINT, completion_tokens BIGINT, cost DOUBLE, cache_hit BOOLEAN, latency_ms BIGINT, "
+	    "status INTEGER);");
 	if (created->HasError()) {
 		throw InvalidInputException("rvbbit persistent cache: " + created->GetError());
+	}
+}
+
+void Engine::RememberLedger(ClientContext &context, LedgerRow row) {
+	std::lock_guard<std::mutex> lock(mu);
+	auto path = SettingString(context, "rvbbit_cache_path", "");
+	if (!path.empty() && (!ledger_loaded || ledger_loaded_path != path)) {
+		EnsureCache(*this, path);
+		auto loaded = cache_con->Query("SELECT seq, kind, model, endpoint, prompt_tokens, completion_tokens, cost, "
+		                               "cache_hit, latency_ms, status FROM ledger ORDER BY seq");
+		if (loaded->HasError()) {
+			throw InvalidInputException("rvbbit ledger: " + loaded->GetError());
+		}
+		if (!ledger_loaded) {
+			while (auto chunk = loaded->Fetch()) {
+				for (idx_t i = 0; i < chunk->size(); i++) {
+					LedgerRow stored;
+					stored.seq = chunk->GetValue(0, i).GetValue<int64_t>();
+					stored.kind = StringValue::Get(chunk->GetValue(1, i));
+					stored.model = StringValue::Get(chunk->GetValue(2, i));
+					stored.endpoint = StringValue::Get(chunk->GetValue(3, i));
+					stored.prompt_tokens = chunk->GetValue(4, i).GetValue<int64_t>();
+					stored.completion_tokens = chunk->GetValue(5, i).GetValue<int64_t>();
+					stored.cost = chunk->GetValue(6, i).GetValue<double>();
+					stored.cache_hit = chunk->GetValue(7, i).GetValue<bool>();
+					stored.latency_ms = chunk->GetValue(8, i).GetValue<int64_t>();
+					stored.status = chunk->GetValue(9, i).GetValue<int32_t>();
+					ledger.push_back(std::move(stored));
+					ledger_seq = std::max(ledger_seq, ledger.back().seq);
+				}
+			}
+		}
+		ledger_loaded = true;
+		ledger_loaded_path = path;
+	}
+	if (row.kind.empty() && row.endpoint.empty() && !row.cache_hit) {
+		return;
+	}
+	row.seq = ++ledger_seq;
+	if (ledger.size() >= 10000) {
+		ledger.erase(ledger.begin());
+	}
+	ledger.push_back(row);
+	if (path.empty()) {
+		return;
+	}
+	auto prepared = cache_con->Prepare("INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+	if (prepared->HasError()) {
+		throw InvalidInputException("rvbbit ledger: " + prepared->GetError());
+	}
+	vector<Value> values {Value::BIGINT(row.seq),
+	                      Value(row.kind),
+	                      Value(row.model),
+	                      Value(row.endpoint),
+	                      Value::BIGINT(row.prompt_tokens),
+	                      Value::BIGINT(row.completion_tokens),
+	                      Value::DOUBLE(row.cost),
+	                      Value::BOOLEAN(row.cache_hit),
+	                      Value::BIGINT(row.latency_ms),
+	                      Value::INTEGER(row.status)};
+	auto inserted = prepared->Execute(values);
+	if (inserted->HasError()) {
+		throw InvalidInputException("rvbbit ledger: " + inserted->GetError());
 	}
 }
 
@@ -506,17 +578,24 @@ string MockChatContent(const Json &request) {
 		if (text.empty()) {
 			text = Between(user, "TEXT:", "The single");
 		}
+		if (text.empty()) {
+			text = Between(user, "TEXTS:", "CATEGORIES:");
+		}
 		string chosen;
 		string current;
 		auto consider = [&](const string &label) {
 			auto trimmed = TrimCopy(label);
+			auto newline = trimmed.find('\n');
+			if (newline != string::npos) {
+				trimmed = TrimCopy(trimmed.substr(0, newline));
+			}
 			if (trimmed.empty()) {
 				return;
 			}
 			if (chosen.empty()) {
 				chosen = trimmed;
 			}
-			if (Overlaps(text, trimmed) || ContainsLower(text, trimmed)) {
+			if (Overlaps(text, trimmed)) {
 				chosen = trimmed;
 			}
 		};
@@ -531,8 +610,18 @@ string MockChatContent(const Json &request) {
 		consider(current);
 		return chosen.empty() ? "other" : chosen;
 	}
+	if (user.find("\nCONSENSUS:") != string::npos) {
+		auto text = Between(user, "TEXTS:", "CONSENSUS:");
+		if (text.size() > 80) {
+			text = text.substr(0, 80);
+		}
+		return "consensus: " + TrimCopy(text);
+	}
 	if (user.find("One-sentence summary:") != string::npos || user.find("Summary:") != string::npos) {
-		auto text = Between(user, "TEXT:", user.find("Summary:") != string::npos ? "Summary:" : "One-sentence");
+		auto text = Between(user, "TEXTS:", "Summary:");
+		if (text.empty()) {
+			text = Between(user, "TEXT:", user.find("Summary:") != string::npos ? "Summary:" : "One-sentence");
+		}
 		if (text.size() > 80) {
 			text = text.substr(0, 80);
 		}
@@ -828,8 +917,10 @@ FetchResult PostOne(ClientContext &context, const RuntimeSettings &settings, con
 		if (context.IsInterrupted()) {
 			throw InterruptException();
 		}
+		auto started = std::chrono::steady_clock::now();
 		FetchResult result = MockPost(engine, kind, body);
-		engine.NoteHttp(kind, url, result.status, body);
+		auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+		RecordExchange(context, kind, url, result.status, body, result.body, static_cast<int64_t>(elapsed));
 		last = result;
 		if (result.ok || !Retryable(result) || attempt == attempts) {
 			return result;
@@ -1247,6 +1338,122 @@ void SetGrammarRegistered(bool value) {
 
 void RecordHttp(const string &kind, const string &url, int status, const string &body) {
 	Engine::Get().NoteHttp(kind, url, status, body);
+}
+
+namespace {
+
+int64_t UsageNumber(const Json &object, const char *key) {
+	auto value = object.Find(key);
+	if (!value || !value->IsNumber() || !std::isfinite(value->num) || value->num < 0) {
+		return 0;
+	}
+	return static_cast<int64_t>(value->num);
+}
+
+string ModelOf(const string &body) {
+	try {
+		auto parsed = Json::Parse(body);
+		auto model = parsed.Find("model");
+		if (model && model->IsString()) {
+			return model->str;
+		}
+	} catch (const std::exception &) {
+	}
+	return "";
+}
+
+void FillUsage(const string &response, LedgerRow &row) {
+	try {
+		auto parsed = Json::Parse(response);
+		auto usage = parsed.Find("usage");
+		if (!usage || !usage->IsObject()) {
+			return;
+		}
+		row.prompt_tokens = UsageNumber(*usage, "prompt_tokens");
+		if (row.prompt_tokens == 0) {
+			row.prompt_tokens = UsageNumber(*usage, "input_tokens");
+		}
+		row.completion_tokens = UsageNumber(*usage, "completion_tokens");
+		if (row.completion_tokens == 0) {
+			row.completion_tokens = UsageNumber(*usage, "output_tokens");
+		}
+		auto cost = usage->Find("cost");
+		if (cost && cost->IsNumber() && std::isfinite(cost->num) && cost->num >= 0) {
+			row.cost = cost->num;
+		}
+	} catch (const std::exception &) {
+	}
+}
+
+} // namespace
+
+void RecordExchange(ClientContext &context, const string &kind, const string &url, int status,
+                    const string &request_body, const string &response_body, int64_t latency_ms) {
+	Engine::Get().NoteHttp(kind, url, status, request_body);
+	LedgerRow row;
+	row.kind = kind;
+	row.model = ModelOf(request_body);
+	row.endpoint = url;
+	row.latency_ms = latency_ms < 0 ? 0 : latency_ms;
+	row.status = status;
+	row.cache_hit = false;
+	FillUsage(response_body, row);
+	Engine::Get().RememberLedger(context, std::move(row));
+}
+
+void RecordCacheHit(ClientContext &context, const string &kind, const string &model) {
+	LedgerRow row;
+	row.kind = kind;
+	row.model = model;
+	row.endpoint = "cache";
+	row.cache_hit = true;
+	row.status = 200;
+	row.cost = 0;
+	Engine::Get().RememberLedger(context, std::move(row));
+}
+
+string RequestModel(const string &body) {
+	return ModelOf(body);
+}
+
+vector<LedgerRow> LedgerSnapshot(ClientContext &context) {
+	Engine::Get().RememberLedger(context, LedgerRow {});
+	auto &engine = Engine::Get();
+	std::lock_guard<std::mutex> lock(engine.mu);
+	return engine.ledger;
+}
+
+SpendSummary SpendSnapshot(ClientContext &context) {
+	auto rows = LedgerSnapshot(context);
+	SpendSummary summary;
+	for (auto &row : rows) {
+		summary.requests++;
+		summary.prompt_tokens += row.prompt_tokens;
+		summary.completion_tokens += row.completion_tokens;
+		summary.cost += row.cost;
+		if (row.cache_hit) {
+			summary.cache_hits++;
+		} else {
+			summary.http_requests++;
+		}
+	}
+	return summary;
+}
+
+void LedgerReset(ClientContext &context) {
+	auto &engine = Engine::Get();
+	std::lock_guard<std::mutex> lock(engine.mu);
+	engine.ledger.clear();
+	engine.ledger_seq = 0;
+	auto path = SettingString(context, "rvbbit_cache_path", "");
+	if (path.empty()) {
+		return;
+	}
+	EnsureCache(engine, path);
+	auto dropped = engine.cache_con->Query("DELETE FROM ledger");
+	if (dropped->HasError()) {
+		throw InvalidInputException("rvbbit ledger: " + dropped->GetError());
+	}
 }
 
 void SetReasoning(Json &body, const string &mode) {

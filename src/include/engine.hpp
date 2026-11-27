@@ -91,6 +91,13 @@ void SetReasoning(Json &body, const string &mode);
 string CanonicalEmbedModel(string model);
 
 void RecordHttp(const string &kind, const string &url, int status, const string &body);
+void RecordExchange(ClientContext &context, const string &kind, const string &url, int status,
+                    const string &request_body, const string &response_body, int64_t latency_ms);
+void RecordCacheHit(ClientContext &context, const string &kind, const string &model);
+string RequestModel(const string &body);
+
+//! Run one catalog operator on a prepared input object. Used by grouped aggregates.
+string EvaluateOperator(ClientContext &context, const string &name, const Json &inputs);
 
 bool CacheGet(ClientContext &context, const string &key, string &payload_out);
 void CachePut(ClientContext &context, const string &key, const string &payload);
@@ -106,8 +113,33 @@ struct HttpLogRow {
 	string body;
 };
 
+struct LedgerRow {
+	int64_t seq = 0;
+	string kind;
+	string model;
+	string endpoint;
+	int64_t prompt_tokens = 0;
+	int64_t completion_tokens = 0;
+	double cost = 0;
+	bool cache_hit = false;
+	int64_t latency_ms = 0;
+	int32_t status = 0;
+};
+
+struct SpendSummary {
+	int64_t requests = 0;
+	int64_t http_requests = 0;
+	int64_t cache_hits = 0;
+	int64_t prompt_tokens = 0;
+	int64_t completion_tokens = 0;
+	double cost = 0;
+};
+
 vector<HttpLogRow> HttpLogSnapshot();
 void HttpLogReset();
+vector<LedgerRow> LedgerSnapshot(ClientContext &context);
+SpendSummary SpendSnapshot(ClientContext &context);
+void LedgerReset(ClientContext &context);
 
 void MockReset();
 void MockFailNext(int32_t count, int32_t status);

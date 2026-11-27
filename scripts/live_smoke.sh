@@ -30,28 +30,34 @@ SET rvbbit_ignore_env = false;
 SELECT
   rvbbit.key_source(),
   rvbbit.truth('Please cancel my appointment', 'The customer explicitly asks to cancel'),
-  rvbbit.choose('My invoice shows a double charge', ['billing', 'technical', 'other']) IS NOT NULL,
-  rvbbit.sentiment('My invoice shows a double charge for October.') IS NOT NULL,
+  rvbbit.choose('My invoice shows a double charge', ['billing', 'technical', 'other']),
+  rvbbit.truth_rank('The food was okay but service was slow', 'How satisfied is the customer?', ['low', 'medium', 'high']),
   len(rvbbit.embed('Please cancel my appointment')),
   (rvbbit.locate('[\"Please cancel\", \"${PNG}\"]', 'the words cancel')).top IS NOT NULL,
-  rvbbit.truth_rank('The food was okay but service was slow', 'How satisfied is the customer?', ['low', 'medium', 'high']) IS NOT NULL,
   (rvbbit.decision_tree(
       'thanks for the help today',
       rvbbit.branch('the customer wants to cancel',
         yes := rvbbit.leaf('retention'),
-        no := rvbbit.branch('this is about billing', yes := rvbbit.leaf('finance'), no := rvbbit.leaf('routine'))))).label IS NOT NULL,
+        no := rvbbit.branch('this is about billing', yes := rvbbit.leaf('finance'), no := rvbbit.leaf('routine'))))).label,
+  (SELECT rvbbit.classify_collection(body, 'billing,shipping,other')
+     FROM (VALUES ('please refund the duplicate invoice'), ('billed twice this month')) t(body)),
+  (SELECT http_requests FROM rvbbit.spend()),
   (SELECT count(*) FILTER (WHERE status = 0) FROM rvbbit.http_log());
 ")"
 echo "$ROW"
-# key_source, truth, choose, sentiment, embed_len, locate, rank, nested_no, transport_failures
-IFS=',' read -r SOURCE TRUTH CHOOSE TONE EMBED_LEN LOCATE RANK NESTED FAILURES <<<"$ROW"
+# source, truth, choose, rank, embed_len, locate, nested, collection, http_requests, transport_failures
+IFS=',' read -r SOURCE TRUTH CHOOSE RANK EMBED_LEN LOCATE NESTED COLLECTION HTTP_REQUESTS FAILURES <<<"$ROW"
 [ "$SOURCE" = "secret" ] || [ "$SOURCE" = "env" ] || { echo "unexpected key source: [$SOURCE]" >&2; exit 1; }
 [ "$TRUTH" = "true" ] || { echo "truth was [$TRUTH], expected true" >&2; exit 1; }
-[ "$CHOOSE" = "true" ] || { echo "choose was null" >&2; exit 1; }
-[ "$TONE" = "true" ] || { echo "sentiment was null" >&2; exit 1; }
+[ "$CHOOSE" = "billing" ] || [ "$CHOOSE" = "technical" ] || [ "$CHOOSE" = "other" ] || {
+  echo "choose was [$CHOOSE], expected billing, technical, or other" >&2; exit 1; }
+[ "$RANK" = "low" ] || [ "$RANK" = "medium" ] || [ "$RANK" = "high" ] || {
+  echo "truth_rank was [$RANK], expected low, medium, or high" >&2; exit 1; }
 [ "$EMBED_LEN" = "1024" ] || { echo "embed length was [$EMBED_LEN], expected 1024" >&2; exit 1; }
 [ "$LOCATE" = "true" ] || { echo "locate did not return a box" >&2; exit 1; }
-[ "$RANK" = "true" ] || { echo "truth_rank was null" >&2; exit 1; }
-[ "$NESTED" = "true" ] || { echo "nested no-branch did not finish" >&2; exit 1; }
+[ "$NESTED" = "routine" ] || { echo "nested no-branch was [$NESTED], expected routine" >&2; exit 1; }
+[ "$COLLECTION" = "billing" ] || [ "$COLLECTION" = "shipping" ] || [ "$COLLECTION" = "other" ] || {
+  echo "classify_collection was [$COLLECTION], expected billing, shipping, or other" >&2; exit 1; }
+[ "$HTTP_REQUESTS" -gt 0 ] || { echo "ledger recorded [$HTTP_REQUESTS] http requests" >&2; exit 1; }
 [ "$FAILURES" = "0" ] || { echo "transport failures were [$FAILURES], expected 0" >&2; exit 1; }
 echo "live smoke finished"

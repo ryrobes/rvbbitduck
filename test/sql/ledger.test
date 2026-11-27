@@ -1,0 +1,62 @@
+# name: test/sql/ledger.test
+# description: per-request usage ledger
+# group: [sql]
+
+require rvbbit
+
+statement ok
+SET rvbbit_transport='mock';
+
+statement ok
+SET rvbbit_ignore_env=true;
+
+statement ok
+SELECT rvbbit.cache_purge();
+
+statement ok
+SELECT rvbbit.ledger_reset();
+
+statement ok
+SELECT rvbbit.http_log_reset();
+
+query I
+SELECT rvbbit.truth('please cancel the appointment', 'the customer wants to cancel');
+----
+true
+
+query IIIIII
+SELECT kind, status, cache_hit, cost, prompt_tokens, completion_tokens
+FROM rvbbit.ledger()
+WHERE NOT cache_hit;
+----
+decision	200	false	0.0	1	1
+
+query I
+SELECT rvbbit.truth('please cancel the appointment', 'the customer wants to cancel');
+----
+true
+
+query III
+SELECT cache_hit, cost, endpoint FROM rvbbit.ledger() WHERE cache_hit;
+----
+true	0.0	cache
+
+query III
+SELECT http_requests, cache_hits, cost FROM rvbbit.spend();
+----
+1	1	0.0
+
+# The key never appears in the ledger.
+query I
+SELECT count(*) FROM rvbbit.ledger()
+WHERE model LIKE '%sk-%' OR endpoint LIKE '%sk-%' OR endpoint LIKE '%Bearer%';
+----
+0
+
+statement ok
+SELECT rvbbit.ledger_reset();
+
+query I
+SELECT requests FROM rvbbit.spend();
+----
+0

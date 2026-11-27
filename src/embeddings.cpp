@@ -162,6 +162,7 @@ vector<vector<double>> EmbedTexts(ClientContext &context, const vector<string> &
 		prepared[row] = ApplyModePrefix(texts[row], mode, provider.embed_model);
 		string cached;
 		if (CacheGet(context, EmbedCacheKey(provider.embed_model, provider.embed_dim, prepared[row]), cached)) {
+			RecordCacheHit(context, "embed", provider.embed_model);
 			vectors[row] = ParseVector(cached);
 			ready[row] = 1;
 			continue;

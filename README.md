@@ -28,7 +28,7 @@ The extension you `LOAD` is named `rvbbit`. Functions live in the `rvbbit` schem
 
 ## What is stubbed
 
-- `classify_collection` and any `aggregate`, `rowset`, or `query` shape are listed in the catalog and raise when called. Dimension operators return `VARCHAR[]` rather than Postgres `SETOF`.
+- `rowset` and `query` shapes are listed in the catalog and raise when called. Dimension operators return `VARCHAR[]` rather than Postgres `SETOF`.
 - SQL validators understand `btrim($output) ~ 'regex'`, `$output !~ 'regex'`, `$output =` / `<>`, `length($inputs->>'field')` comparisons, and `AND` of those. Anything outside that subset is treated as passing, which is how Calliope treats a broken validator. Function-valued validators are stored and not run.
 - Heterogeneous `takes.nodes` are stored. Execution covers homogeneous `factor` takes with `vote`, `first_valid`, `evaluator`, and `consensus`.
 - The vss HNSW index is not linked. Build a `FLOAT[N]` column with `embed(...)::FLOAT[N]` (N must equal `rvbbit_embed_dim`, 1024 by default) and `INSTALL vss; LOAD vss;` yourself. CI covers brute-force `NEAREST`, not HNSW.
@@ -37,7 +37,7 @@ The extension you `LOAD` is named `rvbbit`. Functions live in the `rvbbit` schem
 - `truth_rank` follows the live Jev score shape: `criteria` is an array, and the answer is a numeric index plus a `legend`. Calliope 1.2.3 has no score-question SQL. The label returned is `legend[argmax(probabilities)]`, or the rounded index when probabilities are absent.
 - A WASM HTTP transport is only a hook. `__EMSCRIPTEN__` builds raise a clear error instead of linking libcurl.
 - `classify_collection`, `summarize_collection`, `consensus`, and `collection_themes` are real `GROUP BY` aggregates. A group keeps at most 48 distinct texts (each truncated to 400 characters). Groups larger than 12 texts are reduced in chunks of 12, then reduced again. Per-row `themes(text)` still returns that one text's list.
-- `rvbbit.ledger()` records each OpenRouter call and each cache hit (model, endpoint, token counts, cost, latency, status). `rvbbit.spend()` totals them. Cache hits cost 0. The API key is not stored. When `rvbbit_cache_path` is set, the same rows are appended to a `ledger` table in that file.
+- `rvbbit.ledger()` records each OpenRouter call and each cache hit (model, endpoint, token counts, cost, latency, status, `recorded_at`). `rvbbit.spend()` totals them and rounds `cost` to 6 decimal places. Cache hits cost 0. The API key is not stored. When `rvbbit_cache_path` is set, the same rows are appended to a `ledger` table in that file.
 
 ## Install and build
 
@@ -183,10 +183,10 @@ It is not enough, without replacing a core expression rule, to drop a new infix 
 
 ## Next
 
-1. **Aggregate operators** such as `classify_collection`, heterogeneous `takes.nodes`, and a receipt or cost ledger beside the judgment cache.
+1. **Heterogeneous `takes.nodes`.** Homogeneous `factor` takes already run. A receipt ledger is `rvbbit.ledger()` / `rvbbit.spend()`.
 2. **HNSW as an optional install.** vss stays out of this build. A later helper can create the `FLOAT[N]` column and the index when the user has `LOAD vss`. Brute-force `NEAREST` is what CI checks.
 3. **Grammar follow-ups, only if the API grows.** A real precedence slot for word operators, and a `WHEN` arm that can hold a comparison. Until then the function form stays the contract.
-4. **Live checks, still outside CI.** `scripts/live_smoke.sh` runs truth, choose, sentiment, embed, locate, truth_rank, and a nested `no` branch when `OPENROUTER_API_KEY` is set. CI runs `scripts/transport_smoke.sh` against a local HTTP/HTTPS server instead, and refuses to spend a key.
+4. **Live checks, still outside CI.** `scripts/live_smoke.sh` runs truth, choose, embed, locate, truth_rank, a nested `no` branch, `classify_collection`, and the ledger when `OPENROUTER_API_KEY` is set. CI runs `scripts/transport_smoke.sh` against a local HTTP/HTTPS server instead, and refuses to spend a key.
 5. **WASM transport.** The native client is libcurl. An emscripten build needs its own POST implementation behind `LivePostMany`.
 
 ## License

@@ -14,6 +14,8 @@
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 
+#include <cmath>
+
 namespace duckdb {
 namespace rvbbit {
 
@@ -241,13 +243,20 @@ struct LedgerState : public GlobalTableFunctionState {
 
 unique_ptr<FunctionData> LedgerBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
                                     vector<Identifier> &names) {
-	names = {Identifier("seq"),           Identifier("kind"),        Identifier("model"),
-	         Identifier("endpoint"),      Identifier("prompt_tokens"), Identifier("completion_tokens"),
-	         Identifier("cost"),          Identifier("cache_hit"),   Identifier("latency_ms"),
-	         Identifier("status")};
-	return_types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::DOUBLE, LogicalType::BOOLEAN,
-	                LogicalType::BIGINT, LogicalType::INTEGER};
+	names = {Identifier("seq"),
+	         Identifier("kind"),
+	         Identifier("model"),
+	         Identifier("endpoint"),
+	         Identifier("prompt_tokens"),
+	         Identifier("completion_tokens"),
+	         Identifier("cost"),
+	         Identifier("cache_hit"),
+	         Identifier("latency_ms"),
+	         Identifier("status"),
+	         Identifier("recorded_at")};
+	return_types = {LogicalType::BIGINT,  LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::DOUBLE,  LogicalType::BOOLEAN,
+	                LogicalType::BIGINT,  LogicalType::INTEGER, LogicalType::TIMESTAMP};
 	return make_uniq<TableFunctionData>();
 }
 
@@ -272,6 +281,11 @@ void LedgerScan(ClientContext &, TableFunctionInput &input, DataChunk &output) {
 		output.data[7].SetValue(count, Value::BOOLEAN(row.cache_hit));
 		output.data[8].SetValue(count, Value::BIGINT(row.latency_ms));
 		output.data[9].SetValue(count, Value::INTEGER(row.status));
+		if (row.recorded_at == 0) {
+			output.data[10].SetValue(count, Value(LogicalType::TIMESTAMP));
+		} else {
+			output.data[10].SetValue(count, Value::TIMESTAMP(timestamp_t(row.recorded_at)));
+		}
 		count++;
 	}
 	output.SetCardinalityUnsafe(count);
@@ -287,7 +301,7 @@ unique_ptr<FunctionData> SpendBind(ClientContext &, TableFunctionBindInput &, ve
 	names = {Identifier("requests"),     Identifier("http_requests"), Identifier("cache_hits"),
 	         Identifier("prompt_tokens"), Identifier("completion_tokens"), Identifier("cost")};
 	return_types = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT,
-	                LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::DOUBLE};
+	                LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::DECIMAL(12, 6)};
 	return make_uniq<TableFunctionData>();
 }
 
@@ -309,7 +323,8 @@ void SpendScan(ClientContext &, TableFunctionInput &input, DataChunk &output) {
 	output.data[2].SetValue(0, Value::BIGINT(state.summary.cache_hits));
 	output.data[3].SetValue(0, Value::BIGINT(state.summary.prompt_tokens));
 	output.data[4].SetValue(0, Value::BIGINT(state.summary.completion_tokens));
-	output.data[5].SetValue(0, Value::DOUBLE(state.summary.cost));
+	auto micros = std::llround(state.summary.cost * 1000000.0);
+	output.data[5].SetValue(0, Value::DECIMAL(static_cast<int64_t>(micros), 12, 6));
 	output.SetCardinalityUnsafe(1);
 }
 

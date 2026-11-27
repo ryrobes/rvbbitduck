@@ -23,8 +23,8 @@ png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2,
 print("data:image/png;base64," + base64.b64encode(png).decode(), end="")
 PY
 )"
-# One CSV row, no header. Each field is checked as a whole token.
-ROW="$("$DUCKDB" -unsigned -no-agent -csv -noheader -c "
+# Two CSV rows, no header. The second statement reads the ledger after the calls.
+OUT="$("$DUCKDB" -unsigned -no-agent -csv -noheader -c "
 LOAD rvbbit;
 SET rvbbit_ignore_env = false;
 SELECT
@@ -40,13 +40,18 @@ SELECT
         yes := rvbbit.leaf('retention'),
         no := rvbbit.branch('this is about billing', yes := rvbbit.leaf('finance'), no := rvbbit.leaf('routine'))))).label,
   (SELECT rvbbit.classify_collection(body, 'billing,shipping,other')
-     FROM (VALUES ('please refund the duplicate invoice'), ('billed twice this month')) t(body)),
+     FROM (VALUES ('please refund the duplicate invoice'), ('billed twice this month')) t(body));
+SELECT
   (SELECT http_requests FROM rvbbit.spend()),
   (SELECT count(*) FILTER (WHERE status = 0) FROM rvbbit.http_log());
 ")"
-echo "$ROW"
-# source, truth, choose, rank, embed_len, locate, nested, collection, http_requests, transport_failures
-IFS=',' read -r SOURCE TRUTH CHOOSE RANK EMBED_LEN LOCATE NESTED COLLECTION HTTP_REQUESTS FAILURES <<<"$ROW"
+echo "$OUT"
+# The ledger statement runs after the calls. A subquery in the same SELECT would see zeros.
+mapfile -t LINES <<<"$OUT"
+ROW="${LINES[0]}"
+LEDGER="${LINES[1]:-}"
+IFS=',' read -r SOURCE TRUTH CHOOSE RANK EMBED_LEN LOCATE NESTED COLLECTION <<<"$ROW"
+IFS=',' read -r HTTP_REQUESTS FAILURES <<<"$LEDGER"
 [ "$SOURCE" = "secret" ] || [ "$SOURCE" = "env" ] || { echo "unexpected key source: [$SOURCE]" >&2; exit 1; }
 [ "$TRUTH" = "true" ] || { echo "truth was [$TRUTH], expected true" >&2; exit 1; }
 [ "$CHOOSE" = "billing" ] || [ "$CHOOSE" = "technical" ] || [ "$CHOOSE" = "other" ] || {

@@ -242,7 +242,8 @@ void EnsureCache(Engine &engine, const string &path) {
 	    "CREATE TABLE IF NOT EXISTS trees(name VARCHAR PRIMARY KEY, tree_json VARCHAR NOT NULL);"
 	    "CREATE TABLE IF NOT EXISTS ledger(seq BIGINT, kind VARCHAR, model VARCHAR, endpoint VARCHAR, "
 	    "prompt_tokens BIGINT, completion_tokens BIGINT, cost DOUBLE, cache_hit BOOLEAN, latency_ms BIGINT, "
-	    "status INTEGER);");
+	    "status INTEGER, recorded_at TIMESTAMP);"
+	    "ALTER TABLE ledger ADD COLUMN IF NOT EXISTS recorded_at TIMESTAMP;");
 	if (created->HasError()) {
 		throw InvalidInputException("rvbbit persistent cache: " + created->GetError());
 	}
@@ -254,7 +255,7 @@ void Engine::RememberLedger(ClientContext &context, LedgerRow row) {
 	if (!path.empty() && (!ledger_loaded || ledger_loaded_path != path)) {
 		EnsureCache(*this, path);
 		auto loaded = cache_con->Query("SELECT seq, kind, model, endpoint, prompt_tokens, completion_tokens, cost, "
-		                               "cache_hit, latency_ms, status FROM ledger ORDER BY seq");
+		                               "cache_hit, latency_ms, status, recorded_at FROM ledger ORDER BY seq");
 		if (loaded->HasError()) {
 			throw InvalidInputException("rvbbit ledger: " + loaded->GetError());
 		}
@@ -272,6 +273,10 @@ void Engine::RememberLedger(ClientContext &context, LedgerRow row) {
 					stored.cache_hit = chunk->GetValue(7, i).GetValue<bool>();
 					stored.latency_ms = chunk->GetValue(8, i).GetValue<int64_t>();
 					stored.status = chunk->GetValue(9, i).GetValue<int32_t>();
+					auto recorded = chunk->GetValue(10, i);
+					if (!recorded.IsNull()) {
+						stored.recorded_at = recorded.GetValue<timestamp_t>().value;
+					}
 					ledger.push_back(std::move(stored));
 					ledger_seq = std::max(ledger_seq, ledger.back().seq);
 				}
@@ -291,7 +296,7 @@ void Engine::RememberLedger(ClientContext &context, LedgerRow row) {
 	if (path.empty()) {
 		return;
 	}
-	auto prepared = cache_con->Prepare("INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+	auto prepared = cache_con->Prepare("INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 	if (prepared->HasError()) {
 		throw InvalidInputException("rvbbit ledger: " + prepared->GetError());
 	}
@@ -304,7 +309,8 @@ void Engine::RememberLedger(ClientContext &context, LedgerRow row) {
 	                      Value::DOUBLE(row.cost),
 	                      Value::BOOLEAN(row.cache_hit),
 	                      Value::BIGINT(row.latency_ms),
-	                      Value::INTEGER(row.status)};
+	                      Value::INTEGER(row.status),
+	                      Value::TIMESTAMP(timestamp_t(row.recorded_at))};
 	auto inserted = prepared->Execute(values);
 	if (inserted->HasError()) {
 		throw InvalidInputException("rvbbit ledger: " + inserted->GetError());
@@ -1387,6 +1393,11 @@ void FillUsage(const string &response, LedgerRow &row) {
 
 } // namespace
 
+int64_t NowMicros() {
+	return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch())
+	    .count();
+}
+
 void RecordExchange(ClientContext &context, const string &kind, const string &url, int status,
                     const string &request_body, const string &response_body, int64_t latency_ms) {
 	Engine::Get().NoteHttp(kind, url, status, request_body);
@@ -1397,6 +1408,7 @@ void RecordExchange(ClientContext &context, const string &kind, const string &ur
 	row.latency_ms = latency_ms < 0 ? 0 : latency_ms;
 	row.status = status;
 	row.cache_hit = false;
+	row.recorded_at = NowMicros();
 	FillUsage(response_body, row);
 	Engine::Get().RememberLedger(context, std::move(row));
 }
@@ -1409,6 +1421,7 @@ void RecordCacheHit(ClientContext &context, const string &kind, const string &mo
 	row.cache_hit = true;
 	row.status = 200;
 	row.cost = 0;
+	row.recorded_at = NowMicros();
 	Engine::Get().RememberLedger(context, std::move(row));
 }
 
@@ -1437,6 +1450,7 @@ SpendSummary SpendSnapshot(ClientContext &context) {
 			summary.http_requests++;
 		}
 	}
+	summary.cost = std::round(summary.cost * 1000000.0) / 1000000.0;
 	return summary;
 }
 

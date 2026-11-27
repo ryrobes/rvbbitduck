@@ -1358,22 +1358,66 @@ void Seed() {
 
 } // namespace
 
-string EvaluateOperator(ClientContext &context, const string &name, const Json &inputs) {
-	auto op = CopyOf(name);
-	auto model = OperatorModel(context, op);
-	auto key = FinalCacheKey(op, inputs, model);
-	string cached;
-	if (CacheGet(context, key, cached)) {
-		RecordCacheHit(context, "chat", model);
-		return cached;
+vector<string> EvaluateOperators(ClientContext &context, vector<OperatorCall> calls) {
+	vector<string> outputs(calls.size());
+	auto reasoning = LoadSettings(context).reasoning;
+	struct Pending {
+		idx_t index;
+		string key;
+		string body;
+	};
+	vector<Pending> pending;
+	for (idx_t i = 0; i < calls.size(); i++) {
+		auto op = CopyOf(calls[i].name);
+		auto model = OperatorModel(context, op);
+		auto key = FinalCacheKey(op, calls[i].inputs, model);
+		string cached;
+		if (CacheGet(context, key, cached)) {
+			RecordCacheHit(context, "chat", model);
+			outputs[i] = std::move(cached);
+			continue;
+		}
+		auto user = Render(op.user_prompt, calls[i].inputs, nullptr, "", 1);
+		pending.push_back(Pending {i, std::move(key), ChatBody(op, model, op.system_prompt, user, reasoning)});
 	}
-	auto user = Render(op.user_prompt, inputs, nullptr, "", 1);
-	auto work = Chat(context, op, model, op.system_prompt, user);
-	if (!work.ok) {
-		throw InvalidInputException(work.error.empty() ? "aggregate operator failed" : work.error);
+	if (pending.empty()) {
+		return outputs;
 	}
-	CachePut(context, key, work.output);
-	return work.output;
+	auto finish = [&](const vector<FetchResult> &fetched) {
+		vector<Pending> again;
+		for (idx_t n = 0; n < pending.size(); n++) {
+			if (n >= fetched.size() || !fetched[n].ok) {
+				throw InvalidInputException(n >= fetched.size() ? "aggregate operator failed" : fetched[n].error);
+			}
+			string error;
+			auto output = ChatContentOf(fetched[n].body, error);
+			if (!error.empty() || output.empty()) {
+				again.push_back(std::move(pending[n]));
+				continue;
+			}
+			CachePut(context, pending[n].key, output);
+			outputs[pending[n].index] = std::move(output);
+		}
+		pending = std::move(again);
+	};
+	vector<string> bodies;
+	bodies.reserve(pending.size());
+	for (auto &item : pending) {
+		bodies.push_back(item.body);
+	}
+	finish(FetchPost(context, "chat", bodies));
+	if (!pending.empty()) {
+		bodies.clear();
+		for (auto &item : pending) {
+			bodies.push_back(item.body);
+		}
+		finish(FetchPost(context, "chat", bodies));
+	}
+	if (!pending.empty()) {
+		throw InvalidInputException(
+		    "chat response content was empty. rvbbit_reasoning defaults to disabled so the token budget is not spent on reasoning.");
+	}
+	return outputs;
 }
 
 void RegisterAggregateOperators(ExtensionLoader &loader);

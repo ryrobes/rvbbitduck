@@ -203,13 +203,13 @@ FROM tickets
 GROUP BY region;
 ```
 
-A group keeps at most 48 distinct texts. Each text is cut at 400 characters. Duplicate texts in the group are one input. When a group has more than 12 texts, each chunk of 12 is judged first and those answers are judged again. The category list passed to `classify_collection` should be constant inside the group; the first non-null value is the one that is sent.
+A group keeps at most 48 distinct texts. Each text is cut at 400 characters. Duplicate texts in the group are one input. When a group has more than 12 texts, each chunk of 12 is judged first and those answers are judged again. Every chunk across the groups in one round goes out in one chat POST, under the same concurrency limit as a per-row operator. The category list passed to `classify_collection` should be constant inside the group; the first non-null value is the one that is sent.
 
 `SELECT rvbbit.classify_collection(body, 'billing,other') FROM tickets` with no `GROUP BY` is one collection: the whole table.
 
 ## Usage ledger
 
-Every OpenRouter POST and every cache hit is a row. The API key is not stored. A cache hit has `cost` 0, `cache_hit` true, and `endpoint` `cache`. Token counts and `cost` come from the provider `usage` object when it is present (`prompt_tokens` or `input_tokens`, `completion_tokens` or `output_tokens`, `cost`).
+Every OpenRouter POST and every cache hit is a row, including `recorded_at`. The API key is not stored. A cache hit has `cost` 0, `cache_hit` true, and `endpoint` `cache`. Token counts and `cost` come from the provider `usage` object when it is present (`prompt_tokens` or `input_tokens`, `completion_tokens` or `output_tokens`, `cost`). `spend().cost` is a `DECIMAL(12,6)`.
 
 ```sql
 SELECT kind, model, prompt_tokens, completion_tokens, cost, cache_hit, status

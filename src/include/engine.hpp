@@ -96,8 +96,15 @@ void RecordExchange(ClientContext &context, const string &kind, const string &ur
 void RecordCacheHit(ClientContext &context, const string &kind, const string &model);
 string RequestModel(const string &body);
 
-//! Run one catalog operator on a prepared input object. Used by grouped aggregates.
-string EvaluateOperator(ClientContext &context, const string &name, const Json &inputs);
+//! One catalog operator call. Grouped aggregates batch these through FetchPost.
+struct OperatorCall {
+	string name;
+	Json inputs;
+};
+
+//! Run catalog operators. Cache hits return immediately. Misses share one chat POST
+//! so the process-wide limiter runs them together.
+vector<string> EvaluateOperators(ClientContext &context, vector<OperatorCall> calls);
 
 bool CacheGet(ClientContext &context, const string &key, string &payload_out);
 void CachePut(ClientContext &context, const string &key, const string &payload);
@@ -124,6 +131,8 @@ struct LedgerRow {
 	bool cache_hit = false;
 	int64_t latency_ms = 0;
 	int32_t status = 0;
+	//! Microseconds since the Unix epoch. 0 when a persisted row has no timestamp.
+	int64_t recorded_at = 0;
 };
 
 struct SpendSummary {

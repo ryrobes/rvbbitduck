@@ -88,3 +88,47 @@ query I
 SELECT count(*) >= 2 FROM rvbbit.http_log() WHERE kind = 'chat';
 ----
 true
+
+# GROUP BY: one group, several groups, a short category list, and NULL input.
+query II
+SELECT g, rvbbit.consensus(b) FROM (VALUES (1, 'a')) t(g, b) GROUP BY g;
+----
+1	consensus: - a
+
+query II
+SELECT g, rvbbit.summarize_collection(b) FROM (VALUES (1, 'a')) t(g, b) GROUP BY g;
+----
+1	Summary of: - a
+
+query I
+SELECT len(rvbbit.collection_themes(b)) > 0 FROM (VALUES (1, 'please cancel the billing problem')) t(g, b) GROUP BY g;
+----
+true
+
+query II
+SELECT g, rvbbit.classify_collection(b, 'x,y') FROM (VALUES (1, 'a'), (2, 'b')) t(g, b) GROUP BY g ORDER BY g;
+----
+1	x
+2	x
+
+query I
+SELECT rvbbit.consensus(b) IS NULL AND rvbbit.summarize_collection(b) IS NULL
+   AND rvbbit.collection_themes(b) IS NULL AND rvbbit.classify_collection(b, 'x,y') IS NULL
+FROM (VALUES (1, NULL)) t(g, b)
+GROUP BY g;
+----
+true
+
+# Enough rows that the hash tables combine across threads.
+statement ok
+SET threads=4;
+
+query I
+SELECT count(*) FROM (
+    SELECT g, rvbbit.classify_collection(b, 'x,y') AS label
+    FROM (SELECT i % 16 AS g, 'row ' || i AS b FROM range(2000) t(i))
+    GROUP BY g
+) s
+WHERE label IN ('x', 'y');
+----
+16
